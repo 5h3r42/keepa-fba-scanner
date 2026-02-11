@@ -12,8 +12,15 @@ export function DashboardSettingsPanel() {
     (
       key:
         | "vatRatePercent"
+        | "referralRatePercent"
+        | "perItemFee"
+        | "variableClosingFee"
+        | "fulfilmentFee"
+        | "digitalServicesFeePercent"
         | "prepFee"
         | "inboundFee"
+        | "miscFee"
+        | "feeDiscount"
         | "storageFee"
         | "minRoi"
         | "minProfit"
@@ -38,6 +45,17 @@ export function DashboardSettingsPanel() {
             onChange={(e) => setSetting("vatRegistered", e.target.checked)}
           />
           VAT Registered
+        </label>
+
+        <label className="flex items-center gap-2 pt-7">
+          <input
+            type="checkbox"
+            checked={settings.includeEstimatedVatOnSale}
+            onChange={(e) =>
+              setSetting("includeEstimatedVatOnSale", e.target.checked)
+            }
+          />
+          Include VAT On Sale
         </label>
 
         <label className="flex items-center gap-2 pt-7">
@@ -71,6 +89,67 @@ export function DashboardSettingsPanel() {
           />
         </Field>
 
+        <Field label="Referral Rate (%)">
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            className={numberInputClass}
+            value={settings.referralRatePercent}
+            onChange={(e) =>
+              onNumberSettingChange("referralRatePercent")(e.target.value)
+            }
+          />
+        </Field>
+
+        <Field label="Per-Item Fee (GBP)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={numberInputClass}
+            value={settings.perItemFee}
+            onChange={(e) => onNumberSettingChange("perItemFee")(e.target.value)}
+          />
+        </Field>
+
+        <Field label="Variable Closing Fee (GBP)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={numberInputClass}
+            value={settings.variableClosingFee}
+            onChange={(e) =>
+              onNumberSettingChange("variableClosingFee")(e.target.value)
+            }
+          />
+        </Field>
+
+        <Field label="FBA Fulfilment Fee (GBP)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={numberInputClass}
+            value={settings.fulfilmentFee}
+            onChange={(e) => onNumberSettingChange("fulfilmentFee")(e.target.value)}
+          />
+        </Field>
+
+        <Field label="Digital Services Fee (%)">
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            className={numberInputClass}
+            value={settings.digitalServicesFeePercent}
+            onChange={(e) =>
+              onNumberSettingChange("digitalServicesFeePercent")(e.target.value)
+            }
+          />
+        </Field>
+
         <Field label="Inbound Fee (GBP)">
           <input
             type="number"
@@ -79,6 +158,28 @@ export function DashboardSettingsPanel() {
             className={numberInputClass}
             value={settings.inboundFee}
             onChange={(e) => onNumberSettingChange("inboundFee")(e.target.value)}
+          />
+        </Field>
+
+        <Field label="Misc Fee (GBP)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={numberInputClass}
+            value={settings.miscFee}
+            onChange={(e) => onNumberSettingChange("miscFee")(e.target.value)}
+          />
+        </Field>
+
+        <Field label="Fee Discount (GBP)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={numberInputClass}
+            value={settings.feeDiscount}
+            onChange={(e) => onNumberSettingChange("feeDiscount")(e.target.value)}
           />
         </Field>
 
@@ -142,4 +243,3 @@ function Field({
     </label>
   );
 }
-

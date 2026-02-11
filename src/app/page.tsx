@@ -2,7 +2,6 @@
 
 import { ChangeEvent, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
-import { calcFeesUK, type FeeCategory } from "@/lib/fees";
 import { useDashboardSettings } from "@/lib/dashboard-settings";
 import { DashboardSettingsPanel } from "@/components/dashboard-settings-panel";
 
@@ -11,6 +10,7 @@ interface Product {
   asin: string;
   rawCost: number;
   cost: number;
+  calcCost: number;
   bsr: number;
   sellPrice: number;
   referralFee: number;
@@ -40,8 +40,6 @@ type KeepaResponse = {
     message?: string;
   };
 };
-
-const CATEGORY: FeeCategory = "OTHER";
 const PRODUCT_KEYS = [
   "product",
   "productname",
@@ -61,6 +59,10 @@ const COST_KEYS = [
   "purchaseprice",
   "unitcost",
 ];
+const COST_EX_VAT_KEYS = ["costexvat", "costwithoutvat", "exvatcost"];
+const COST_GROSS_KEYS = COST_KEYS.filter(
+  (key) => !COST_EX_VAT_KEYS.includes(key),
+);
 const BSR_KEYS = ["bsr", "salesrank", "rank"];
 
 type KeepaEnriched = {
@@ -111,6 +113,38 @@ const findNumber = (row: SheetRow, keys: string[]): number => {
   return 0;
 };
 
+const findNumberFromNormalized = (
+  normalized: Record<string, unknown>,
+  keys: string[],
+): number => {
+  for (const key of keys) {
+    const value = normalized[normalizeKey(key)];
+    const num = toNumber(value);
+    if (num > 0) {
+      return num;
+    }
+  }
+  return 0;
+};
+
+const resolveCost = (row: SheetRow): { displayCost: number; calcCost: number } => {
+  const normalized = normalizeRow(row);
+
+  // If sheet has explicit ex-VAT cost, use it directly.
+  const exVatCost = findNumberFromNormalized(normalized, COST_EX_VAT_KEYS);
+  if (exVatCost > 0) {
+    return { displayCost: exVatCost, calcCost: exVatCost };
+  }
+
+  // Default behavior: treat entered cost as calculation-ready (ex-VAT for VAT sellers).
+  const grossCost = findNumberFromNormalized(normalized, COST_GROSS_KEYS);
+  if (grossCost > 0) {
+    return { displayCost: grossCost, calcCost: grossCost };
+  }
+
+  return { displayCost: 0, calcCost: 0 };
+};
+
 const extractSellPrice = (product: KeepaProduct): number | null => {
   if (typeof product.buyBoxPrice === "number" && product.buyBoxPrice > 0) {
     return product.buyBoxPrice / 100;
@@ -133,13 +167,23 @@ const extractSellPrice = (product: KeepaProduct): number | null => {
 };
 
 const extractBsr = (product: KeepaProduct): number => {
+  const currentSalesRank = product.stats?.current?.[3];
+  if (typeof currentSalesRank === "number" && currentSalesRank > 0) {
+    return Math.round(currentSalesRank);
+  }
+
   const salesRanks = product.salesRanks;
   if (!salesRanks) return 0;
 
-  const ranks = Object.values(salesRanks).flat();
-  const valid = ranks.filter((rank) => typeof rank === "number" && rank > 0);
-  if (valid.length === 0) return 0;
-  return Math.min(...valid);
+  const latestRanks = Object.values(salesRanks)
+    .map((series) => {
+      const valid = series.filter((rank) => typeof rank === "number" && rank > 0);
+      return valid.length > 0 ? valid[valid.length - 1] : 0;
+    })
+    .filter((rank) => rank > 0);
+
+  if (latestRanks.length === 0) return 0;
+  return Math.min(...latestRanks);
 };
 
 export default function Page() {
@@ -206,15 +250,16 @@ export default function Page() {
       const bsr = csvBsr || keepa?.bsr || 0;
 
       const vatRate = settings.vatRatePercent / 100;
-      const cost = settings.vatRegistered ? rawCost / (1 + vatRate) : rawCost;
+      const { displayCost: cost, calcCost } = resolveCost(row);
       const sellPrice = keepa?.sellPrice ?? 0;
 
-      if (!sellPrice || cost <= 0) {
+      if (!sellPrice || calcCost <= 0) {
         return {
           product,
           asin,
           rawCost,
           cost,
+          calcCost,
           bsr,
           sellPrice: 0,
           referralFee: 0,
@@ -227,28 +272,31 @@ export default function Page() {
         };
       }
 
-      const feeBreakdown = calcFeesUK({
-        sellPriceGross: sellPrice,
-        category: CATEGORY,
-        prepFee: settings.prepFee,
-        inboundFee: settings.inboundFee,
-        vat: {
-          vatRegistered: settings.vatRegistered,
-          vatRate,
-        },
-      });
-
-      const referralFee = settings.vatRegistered
-        ? feeBreakdown.referralFeeExVat
-        : feeBreakdown.referralFeeGross;
-      const fbaFee = settings.vatRegistered
-        ? feeBreakdown.amazonFeesExVat
-        : feeBreakdown.amazonFeesGross;
-      const revenue = settings.vatRegistered ? feeBreakdown.sellPriceNet : sellPrice;
+      const referralFee = sellPrice * (settings.referralRatePercent / 100);
+      const fbaFee = settings.fulfilmentFee;
+      const amazonFeeBase =
+        referralFee +
+        settings.perItemFee +
+        settings.variableClosingFee +
+        settings.fulfilmentFee;
+      const digitalServicesFee =
+        amazonFeeBase * (settings.digitalServicesFeePercent / 100);
+      const amazonFeesTotal = amazonFeeBase + digitalServicesFee;
+      const vatOnSale =
+        settings.vatRegistered && settings.includeEstimatedVatOnSale
+          ? sellPrice * (vatRate / (1 + vatRate))
+          : 0;
       const totalCost =
-        cost + fbaFee + settings.prepFee + settings.inboundFee + settings.storageFee;
-      const profit = revenue - totalCost;
-      const roi = cost > 0 ? (profit / cost) * 100 : 0;
+        calcCost +
+        settings.prepFee +
+        settings.inboundFee +
+        settings.miscFee +
+        settings.storageFee +
+        amazonFeesTotal +
+        vatOnSale -
+        settings.feeDiscount;
+      const profit = sellPrice - totalCost;
+      const roi = calcCost > 0 ? (profit / calcCost) * 100 : 0;
       const passesRoi = roi >= settings.minRoi;
       const passesProfit = profit >= settings.minProfit;
       const passesBsr = bsr > 0 && bsr <= settings.maxBsr;
@@ -259,6 +307,7 @@ export default function Page() {
         asin,
         rawCost,
         cost,
+        calcCost,
         bsr,
         sellPrice,
         referralFee,
@@ -283,8 +332,10 @@ export default function Page() {
     setFileName(file.name);
     setError("");
 
-    const data = await file.arrayBuffer();
-    const workbook = XLSX.read(data);
+    const isCsv = file.name.toLowerCase().endsWith(".csv");
+    const workbook = isCsv
+      ? XLSX.read(await file.text(), { type: "string" })
+      : XLSX.read(await file.arrayBuffer(), { type: "array" });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonData = XLSX.utils.sheet_to_json<SheetRow>(sheet);
     setRows(jsonData);
@@ -311,17 +362,12 @@ export default function Page() {
         <DashboardSettingsPanel />
       ) : (
         <>
-          <p className="mb-6 text-gray-300">
-            Active filters: ROI &gt;= {settings.minRoi.toFixed(1)}%, Profit &gt;= £
-            {settings.minProfit.toFixed(2)}, BSR &lt;= {settings.maxBsr.toLocaleString()}
-          </p>
-
           <div className="flex gap-4 mb-6">
             <label className="bg-gray-600 px-6 py-3 rounded cursor-pointer">
               {loading ? "Loading..." : "Choose File"}
               <input
                 type="file"
-                accept=".xlsx,.xls"
+                accept=".xlsx,.xls,.csv"
                 onChange={handleFileUpload}
                 className="hidden"
               />
@@ -368,7 +414,7 @@ export default function Page() {
                       {p.sellPrice ? formatCurrency(p.profit) : "-"}
                     </td>
                     <td className="whitespace-nowrap px-3 py-4">
-                      {p.sellPrice && p.cost > 0 ? `${p.roi.toFixed(1)}%` : "-"}
+                      {p.sellPrice && p.calcCost > 0 ? `${p.roi.toFixed(1)}%` : "-"}
                     </td>
                   </tr>
                 ))}
