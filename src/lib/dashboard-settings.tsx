@@ -12,6 +12,8 @@ import {
 export type DashboardSettings = {
   vatRegistered: boolean;
   vatRatePercent: number;
+  useVatDueModel: boolean;
+  costEnteredExVat: boolean;
   includeEstimatedVatOnSale: boolean;
   referralRatePercent: number;
   perItemFee: number;
@@ -34,6 +36,8 @@ export type DashboardView = "dashboard" | "settings";
 const defaultSettings: DashboardSettings = {
   vatRegistered: true,
   vatRatePercent: 20,
+  useVatDueModel: true,
+  costEnteredExVat: true,
   includeEstimatedVatOnSale: true,
   referralRatePercent: 15,
   perItemFee: 0.75,

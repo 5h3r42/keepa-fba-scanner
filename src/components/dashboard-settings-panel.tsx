@@ -38,35 +38,6 @@ export function DashboardSettingsPanel() {
       <h2 className="mb-3 text-lg font-semibold">Settings</h2>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
-        <label className="flex items-center gap-2 pt-7">
-          <input
-            type="checkbox"
-            checked={settings.vatRegistered}
-            onChange={(e) => setSetting("vatRegistered", e.target.checked)}
-          />
-          VAT Registered
-        </label>
-
-        <label className="flex items-center gap-2 pt-7">
-          <input
-            type="checkbox"
-            checked={settings.includeEstimatedVatOnSale}
-            onChange={(e) =>
-              setSetting("includeEstimatedVatOnSale", e.target.checked)
-            }
-          />
-          Include VAT On Sale
-        </label>
-
-        <label className="flex items-center gap-2 pt-7">
-          <input
-            type="checkbox"
-            checked={settings.onlyShowQualified}
-            onChange={(e) => setSetting("onlyShowQualified", e.target.checked)}
-          />
-          Show Qualified Only
-        </label>
-
         <Field label="VAT Rate (%)">
           <input
             type="number"
@@ -224,6 +195,55 @@ export function DashboardSettingsPanel() {
             onChange={(e) => onNumberSettingChange("maxBsr")(e.target.value)}
           />
         </Field>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 text-sm">
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.vatRegistered}
+            onChange={(e) => setSetting("vatRegistered", e.target.checked)}
+          />
+          VAT Registered
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.useVatDueModel}
+            onChange={(e) => setSetting("useVatDueModel", e.target.checked)}
+          />
+          Use VAT Due Model
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.costEnteredExVat}
+            onChange={(e) => setSetting("costEnteredExVat", e.target.checked)}
+          />
+          Cost Entered Ex-VAT
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.includeEstimatedVatOnSale}
+            onChange={(e) =>
+              setSetting("includeEstimatedVatOnSale", e.target.checked)
+            }
+          />
+          Include VAT On Sale
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.onlyShowQualified}
+            onChange={(e) => setSetting("onlyShowQualified", e.target.checked)}
+          />
+          Show Qualified Only
+        </label>
       </div>
     </section>
   );
