@@ -127,6 +127,11 @@ type SortConfig = {
   direction: "asc" | "desc";
 } | null;
 
+type ColumnLayoutItem = {
+  key: SortKey;
+  visible: boolean;
+};
+
 type MatchSummary = {
   total: number;
   csvAsin: number;
@@ -158,9 +163,70 @@ type SavedScan = {
 
 const SAVED_SCANS_STORAGE_KEY = "keepa-saved-scans-v1";
 const CURRENT_SCAN_STORAGE_KEY = "keepa-current-scan-v1";
+const COLUMN_LAYOUT_STORAGE_KEY = "keepa-column-layout-v1";
 const MAX_SAVED_SCANS = 10;
 const MAX_SAVED_SCAN_ROWS = 1000;
 const LIVE_FALLBACK_BATCH_SIZE = 100;
+
+const DEFAULT_COLUMN_LAYOUT: ColumnLayoutItem[] = [
+  { key: "product", visible: true },
+  { key: "barcode", visible: true },
+  { key: "asin", visible: true },
+  { key: "matchSource", visible: true },
+  { key: "status", visible: true },
+  { key: "bsr", visible: true },
+  { key: "bsrDrops90d", visible: true },
+  { key: "cost", visible: true },
+  { key: "sellPrice", visible: true },
+  { key: "buyBox90dAvg", visible: true },
+  { key: "newOfferCount", visible: true },
+  { key: "amazonInStockPercent", visible: true },
+  { key: "referralFee", visible: true },
+  { key: "fbaFee", visible: true },
+  { key: "maxBuyCost", visible: true },
+  { key: "profit", visible: true },
+  { key: "roi", visible: true },
+];
+
+const COLUMN_LABELS: Record<SortKey, string> = {
+  product: "Product",
+  barcode: "Barcode",
+  asin: "ASIN",
+  matchSource: "Match Source",
+  status: "Status",
+  bsr: "BSR",
+  bsrDrops90d: "BSR Drops 90d",
+  cost: "Cost",
+  sellPrice: "Sell Price",
+  buyBox90dAvg: "Buy Box 90d Avg",
+  newOfferCount: "New Offers",
+  amazonInStockPercent: "Amazon In Stock %",
+  referralFee: "Referral Fee",
+  fbaFee: "FBA Fee",
+  maxBuyCost: "Max Buy Cost",
+  profit: "Profit",
+  roi: "ROI",
+};
+
+const COLUMN_WIDTHS: Record<SortKey, string> = {
+  product: "w-[20%]",
+  barcode: "w-[9%]",
+  asin: "w-[8%]",
+  matchSource: "w-[10%]",
+  status: "w-[11%]",
+  bsr: "w-[5%]",
+  bsrDrops90d: "w-[6%]",
+  cost: "w-[5%]",
+  sellPrice: "w-[6%]",
+  buyBox90dAvg: "w-[6%]",
+  newOfferCount: "w-[6%]",
+  amazonInStockPercent: "w-[6%]",
+  referralFee: "w-[6%]",
+  fbaFee: "w-[5%]",
+  maxBuyCost: "w-[6%]",
+  profit: "w-[5%]",
+  roi: "w-[5%]",
+};
 
 type CurrentScanSnapshot = {
   products: Product[];
@@ -530,6 +596,11 @@ export default function Page() {
   });
   const [error, setError] = useState("");
   const [sortConfig, setSortConfig] = useState<SortConfig>(null);
+  const [columnLayout, setColumnLayout] =
+    useState<ColumnLayoutItem[]>(DEFAULT_COLUMN_LAYOUT);
+  const [columnManagerOpen, setColumnManagerOpen] = useState(false);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [currentPage, setCurrentPage] = useState(1);
   const [scanStateLoaded, setScanStateLoaded] = useState(false);
   const lastHandledSaveSignalRef = useRef(0);
   const actionButtonClass =
@@ -559,6 +630,48 @@ export default function Page() {
       // Ignore malformed saved scan storage.
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(COLUMN_LAYOUT_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ColumnLayoutItem[];
+      if (!Array.isArray(parsed)) return;
+
+      const defaultKeys = new Set(DEFAULT_COLUMN_LAYOUT.map((item) => item.key));
+      const validItems = parsed.filter(
+        (item): item is ColumnLayoutItem =>
+          Boolean(item) &&
+          typeof item.key === "string" &&
+          defaultKeys.has(item.key as SortKey) &&
+          typeof item.visible === "boolean",
+      );
+      if (validItems.length === 0) return;
+
+      const seen = new Set<SortKey>();
+      const normalized: ColumnLayoutItem[] = [];
+      for (const item of validItems) {
+        const key = item.key as SortKey;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        normalized.push({ key, visible: item.visible });
+      }
+
+      for (const fallback of DEFAULT_COLUMN_LAYOUT) {
+        if (!seen.has(fallback.key)) {
+          normalized.push(fallback);
+        }
+      }
+
+      setColumnLayout(normalized);
+    } catch {
+      // Ignore malformed column layout storage.
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(COLUMN_LAYOUT_STORAGE_KEY, JSON.stringify(columnLayout));
+  }, [columnLayout]);
 
   useEffect(() => {
     try {
@@ -1116,6 +1229,54 @@ export default function Page() {
     return sortConfig.direction === "asc" ? sorted : sorted.reverse();
   }, [visibleProducts, sortConfig]);
 
+  const totalPages = Math.max(1, Math.ceil(sortedProducts.length / rowsPerPage));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [rowsPerPage, sortConfig, settings.onlyShowQualified, products.length]);
+
+  const paginatedProducts = useMemo(() => {
+    const startIndex = (currentPage - 1) * rowsPerPage;
+    return sortedProducts.slice(startIndex, startIndex + rowsPerPage);
+  }, [sortedProducts, currentPage, rowsPerPage]);
+
+  const visibleColumns = useMemo(
+    () => columnLayout.filter((item) => item.visible).map((item) => item.key),
+    [columnLayout],
+  );
+
+  const toggleColumnVisibility = (key: SortKey) => {
+    setColumnLayout((prev) => {
+      const visibleCount = prev.filter((item) => item.visible).length;
+      return prev.map((item) => {
+        if (item.key !== key) return item;
+        if (item.visible && visibleCount === 1) return item;
+        return { ...item, visible: !item.visible };
+      });
+    });
+  };
+
+  const moveColumn = (index: number, direction: -1 | 1) => {
+    setColumnLayout((prev) => {
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= prev.length) return prev;
+      const copy = [...prev];
+      const [item] = copy.splice(index, 1);
+      copy.splice(nextIndex, 0, item);
+      return copy;
+    });
+  };
+
+  const resetColumnLayout = () => {
+    setColumnLayout(DEFAULT_COLUMN_LAYOUT);
+  };
+
   const toggleSort = (key: SortKey) => {
     setSortConfig((prev) => {
       if (!prev || prev.key !== key) return { key, direction: "asc" };
@@ -1262,6 +1423,13 @@ export default function Page() {
             >
               View Saved Scans ({savedScans.length})
             </button>
+            <button
+              type="button"
+              onClick={() => setColumnManagerOpen(true)}
+              className={actionButtonClass}
+            >
+              Column Manager
+            </button>
           </div>
 
           {(supplierFile || supplierFileName) && (
@@ -1324,135 +1492,268 @@ export default function Page() {
             <table className="w-full min-w-[1900px] text-left table-fixed">
               <thead className="bg-zinc-800/90">
                 <tr>
-                  <th className="p-4 w-[20%]">
-                    <SortHeader label="Product" icon={sortIcon("product")} onClick={() => toggleSort("product")} />
-                  </th>
-                  <th className="px-3 py-4 w-[9%] border-l border-zinc-700">
-                    <SortHeader label="Barcode" icon={sortIcon("barcode")} onClick={() => toggleSort("barcode")} />
-                  </th>
-                  <th className="px-3 py-4 w-[8%] border-l border-zinc-700">
-                    <SortHeader label="ASIN" icon={sortIcon("asin")} onClick={() => toggleSort("asin")} />
-                  </th>
-                  <th className="px-3 py-4 w-[10%] border-l border-zinc-700">
-                    <SortHeader label="Match Source" icon={sortIcon("matchSource")} onClick={() => toggleSort("matchSource")} />
-                  </th>
-                  <th className="px-3 py-4 w-[11%] border-l border-zinc-700">
-                    <SortHeader label="Status" icon={sortIcon("status")} onClick={() => toggleSort("status")} />
-                  </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
-                    <SortHeader label="BSR" icon={sortIcon("bsr")} onClick={() => toggleSort("bsr")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="BSR Drops 90d" icon={sortIcon("bsrDrops90d")} onClick={() => toggleSort("bsrDrops90d")} />
-                  </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
-                    <SortHeader label="Cost" icon={sortIcon("cost")} onClick={() => toggleSort("cost")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="Sell Price" icon={sortIcon("sellPrice")} onClick={() => toggleSort("sellPrice")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="Buy Box 90d Avg" icon={sortIcon("buyBox90dAvg")} onClick={() => toggleSort("buyBox90dAvg")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="New Offers" icon={sortIcon("newOfferCount")} onClick={() => toggleSort("newOfferCount")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="Amazon In Stock %" icon={sortIcon("amazonInStockPercent")} onClick={() => toggleSort("amazonInStockPercent")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="Referral Fee" icon={sortIcon("referralFee")} onClick={() => toggleSort("referralFee")} />
-                  </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
-                    <SortHeader label="FBA Fee" icon={sortIcon("fbaFee")} onClick={() => toggleSort("fbaFee")} />
-                  </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
-                    <SortHeader label="Max Buy Cost" icon={sortIcon("maxBuyCost")} onClick={() => toggleSort("maxBuyCost")} />
-                  </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
-                    <SortHeader label="Profit" icon={sortIcon("profit")} onClick={() => toggleSort("profit")} />
-                  </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
-                    <SortHeader label="ROI" icon={sortIcon("roi")} onClick={() => toggleSort("roi")} />
-                  </th>
+                  {visibleColumns.map((columnKey, idx) => (
+                    <th
+                      key={columnKey}
+                      className={`${idx === 0 ? "p-4" : "px-3 py-4 border-l border-zinc-700"} ${COLUMN_WIDTHS[columnKey]}`}
+                    >
+                      <SortHeader
+                        label={COLUMN_LABELS[columnKey]}
+                        icon={sortIcon(columnKey)}
+                        onClick={() => toggleSort(columnKey)}
+                      />
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {sortedProducts.map((p, index) => (
+                {paginatedProducts.map((p, index) => (
                   <tr
                     key={`${p.barcode}-${p.asin}-${index}`}
                     className="border-t border-zinc-800 bg-black hover:bg-zinc-950/80"
                   >
-                    <td className="p-4 max-w-0">
-                      {p.asin ? (
-                        <a
-                          href={`https://www.amazon.co.uk/dp/${p.asin}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="block truncate text-zinc-100 underline-offset-2 hover:underline"
-                          title={p.product}
-                        >
-                          {p.product}
-                        </a>
-                      ) : (
-                        <span className="block truncate" title={p.product}>
-                          {p.product}
-                        </span>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-slate-800">{p.barcode || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.asin || "-"}</td>
-                    <td className="px-3 py-4 border-l border-zinc-800">
-                      <span
-                        className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-slate-300"
-                        title={p.matchSource}
-                      >
-                        <span className="truncate">{p.matchSource}</span>
-                      </span>
-                    </td>
-                    <td className="px-3 py-4 border-l border-zinc-800">
-                      <span
-                        className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-slate-300"
-                        title={p.status}
-                      >
-                        <span className="truncate">{p.status}</span>
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.bsr || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.bsrDrops90d || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{formatCurrency(p.cost)}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.sellPrice ? formatCurrency(p.sellPrice) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.buyBox90dAvg ? formatCurrency(p.buyBox90dAvg) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.newOfferCount || "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.amazonInStockPercent ? `${p.amazonInStockPercent.toFixed(0)}%` : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.referralFee ? formatCurrency(p.referralFee) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.fbaFee ? formatCurrency(p.fbaFee) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.maxBuyCost ? formatCurrency(p.maxBuyCost) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.sellPrice ? formatCurrency(p.profit) : "-"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
-                      {p.sellPrice && p.cost > 0 ? `${p.roi.toFixed(1)}%` : "-"}
-                    </td>
+                    {visibleColumns.map((columnKey, idx) => {
+                      const cellClass =
+                        idx === 0
+                          ? "p-4"
+                          : "whitespace-nowrap px-3 py-4 border-l border-zinc-800";
+
+                      if (columnKey === "product") {
+                        return (
+                          <td key={columnKey} className={`${cellClass} max-w-0`}>
+                            {p.asin ? (
+                              <a
+                                href={`https://www.amazon.co.uk/dp/${p.asin}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block truncate text-zinc-100 underline-offset-2 hover:underline"
+                                title={p.product}
+                              >
+                                {p.product}
+                              </a>
+                            ) : (
+                              <span className="block truncate" title={p.product}>
+                                {p.product}
+                              </span>
+                            )}
+                          </td>
+                        );
+                      }
+
+                      if (columnKey === "matchSource") {
+                        return (
+                          <td key={columnKey} className={`${cellClass} border-l border-zinc-800`}>
+                            <span
+                              className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-zinc-300"
+                              title={p.matchSource}
+                            >
+                              <span className="truncate">{p.matchSource}</span>
+                            </span>
+                          </td>
+                        );
+                      }
+
+                      if (columnKey === "status") {
+                        return (
+                          <td key={columnKey} className={`${cellClass} border-l border-zinc-800`}>
+                            <span
+                              className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-zinc-300"
+                              title={p.status}
+                            >
+                              <span className="truncate">{p.status}</span>
+                            </span>
+                          </td>
+                        );
+                      }
+
+                      const value = (() => {
+                        switch (columnKey) {
+                          case "barcode":
+                            return p.barcode || "-";
+                          case "asin":
+                            return p.asin || "-";
+                          case "bsr":
+                            return p.bsr || "-";
+                          case "bsrDrops90d":
+                            return p.bsrDrops90d || "-";
+                          case "cost":
+                            return formatCurrency(p.cost);
+                          case "sellPrice":
+                            return p.sellPrice ? formatCurrency(p.sellPrice) : "-";
+                          case "buyBox90dAvg":
+                            return p.buyBox90dAvg ? formatCurrency(p.buyBox90dAvg) : "-";
+                          case "newOfferCount":
+                            return p.newOfferCount || "-";
+                          case "amazonInStockPercent":
+                            return p.amazonInStockPercent
+                              ? `${p.amazonInStockPercent.toFixed(0)}%`
+                              : "-";
+                          case "referralFee":
+                            return p.referralFee ? formatCurrency(p.referralFee) : "-";
+                          case "fbaFee":
+                            return p.fbaFee ? formatCurrency(p.fbaFee) : "-";
+                          case "maxBuyCost":
+                            return p.maxBuyCost ? formatCurrency(p.maxBuyCost) : "-";
+                          case "profit":
+                            return p.sellPrice ? formatCurrency(p.profit) : "-";
+                          case "roi":
+                            return p.sellPrice && p.cost > 0 ? `${p.roi.toFixed(1)}%` : "-";
+                          default:
+                            return "-";
+                        }
+                      })();
+
+                      return <td key={columnKey} className={cellClass}>{value}</td>;
+                    })}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-zinc-800 bg-black px-4 py-3 text-zinc-300">
+            <p className="text-sm">{`0 of ${sortedProducts.length} row(s) selected.`}</p>
+
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-200">Rows per page</span>
+                <select
+                  value={rowsPerPage}
+                  onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm text-zinc-100"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={30}>30</option>
+                  <option value={40}>40</option>
+                </select>
+              </div>
+
+              <span className="text-sm text-zinc-200">
+                Page {currentPage} of {totalPages}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                  className="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300"
+                  aria-label="First page"
+                >
+                  «
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage === 1}
+                  className="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300"
+                  aria-label="Previous page"
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                  }
+                  disabled={currentPage >= totalPages}
+                  className="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300"
+                  aria-label="Next page"
+                >
+                  ›
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage >= totalPages}
+                  className="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300"
+                  aria-label="Last page"
+                >
+                  »
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {columnManagerOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+              <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+                <div className="sticky top-0 z-10 mb-2 flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-6 py-4">
+                  <h2 className="text-xl font-semibold">Column Manager</h2>
+                  <button
+                    type="button"
+                    onClick={() => setColumnManagerOpen(false)}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 transition hover:bg-zinc-800"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <p className="mb-4 px-6 text-sm text-zinc-300">
+                  Show/hide columns, reorder them, and your layout will be saved.
+                </p>
+
+                <div className="space-y-2 overflow-y-auto px-6 pb-4">
+                  {columnLayout.map((item, index) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black px-3 py-2"
+                    >
+                      <label className="flex items-center gap-3 text-sm text-zinc-100">
+                        <input
+                          type="checkbox"
+                          checked={item.visible}
+                          onChange={() => toggleColumnVisibility(item.key)}
+                          disabled={
+                            item.visible &&
+                            columnLayout.filter((column) => column.visible).length === 1
+                          }
+                        />
+                        <span>{COLUMN_LABELS[item.key]}</span>
+                      </label>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => moveColumn(index, -1)}
+                          disabled={index === 0}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveColumn(index, 1)}
+                          disabled={index === columnLayout.length - 1}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="sticky bottom-0 mt-2 flex justify-end gap-2 border-t border-zinc-800 bg-zinc-950 px-6 py-4">
+                  <button
+                    type="button"
+                    onClick={resetColumnLayout}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition hover:bg-zinc-800"
+                  >
+                    Reset to Default
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setColumnManagerOpen(false)}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition hover:bg-zinc-800"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {scanModalOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
