@@ -31,7 +31,7 @@ export type DashboardSettings = {
   onlyShowQualified: boolean;
 };
 
-export type DashboardView = "dashboard" | "settings";
+export type DashboardView = "dashboard" | "settings" | "saved";
 
 const defaultSettings: DashboardSettings = {
   vatRegistered: true,
@@ -62,6 +62,8 @@ type DashboardSettingsContextValue = {
   setActiveView: (view: DashboardView) => void;
   scanModalOpen: boolean;
   setScanModalOpen: (open: boolean) => void;
+  saveScanSignal: number;
+  requestSaveScan: () => void;
   setSetting: <K extends keyof DashboardSettings>(
     key: K,
     value: DashboardSettings[K],
@@ -75,6 +77,7 @@ export function DashboardSettingsProvider({ children }: { children: ReactNode })
   const [settings, setSettings] = useState<DashboardSettings>(defaultSettings);
   const [activeView, setActiveView] = useState<DashboardView>("dashboard");
   const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [saveScanSignal, setSaveScanSignal] = useState(0);
   const [loadedFromStorage, setLoadedFromStorage] = useState(false);
 
   useEffect(() => {
@@ -109,6 +112,8 @@ export function DashboardSettingsProvider({ children }: { children: ReactNode })
       setActiveView,
       scanModalOpen,
       setScanModalOpen,
+      saveScanSignal,
+      requestSaveScan: () => setSaveScanSignal((prev) => prev + 1),
       setSetting: <K extends keyof DashboardSettings>(
         key: K,
         value: DashboardSettings[K],
@@ -116,7 +121,7 @@ export function DashboardSettingsProvider({ children }: { children: ReactNode })
         setSettings((prev) => ({ ...prev, [key]: value }));
       },
     }),
-    [settings, activeView, scanModalOpen],
+    [settings, activeView, scanModalOpen, saveScanSignal],
   );
 
   return (

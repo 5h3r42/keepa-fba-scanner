@@ -6,7 +6,7 @@ export function DashboardSettingsPanel() {
   const { settings, setSetting } = useDashboardSettings();
 
   const numberInputClass =
-    "w-full rounded bg-[#0b1b34] border border-[#294571] px-2 py-2 text-sm";
+    "w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none ring-offset-zinc-950 placeholder:text-zinc-500 focus-visible:ring-2 focus-visible:ring-zinc-600";
 
   const onNumberSettingChange =
     (
@@ -34,8 +34,8 @@ export function DashboardSettingsPanel() {
     };
 
   return (
-    <section className="mb-6 rounded-lg border border-[#2a456e] bg-[#16315b] p-4">
-      <h2 className="mb-3 text-lg font-semibold">Settings</h2>
+    <section className="mb-6 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+      <h2 className="mb-4 text-lg font-semibold tracking-tight">Settings</h2>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
         <Field label="VAT Rate (%)">
@@ -198,52 +198,35 @@ export function DashboardSettingsPanel() {
       </div>
 
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 text-sm">
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={settings.vatRegistered}
-            onChange={(e) => setSetting("vatRegistered", e.target.checked)}
-          />
-          VAT Registered
-        </label>
+        <SwitchField
+          label="VAT Registered"
+          checked={settings.vatRegistered}
+          onChange={(checked) => setSetting("vatRegistered", checked)}
+        />
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={settings.useVatDueModel}
-            onChange={(e) => setSetting("useVatDueModel", e.target.checked)}
-          />
-          Use VAT Due Model
-        </label>
+        <SwitchField
+          label="Use VAT Due Model"
+          checked={settings.useVatDueModel}
+          onChange={(checked) => setSetting("useVatDueModel", checked)}
+        />
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={settings.costEnteredExVat}
-            onChange={(e) => setSetting("costEnteredExVat", e.target.checked)}
-          />
-          Cost Entered Ex-VAT
-        </label>
+        <SwitchField
+          label="Cost Entered Ex-VAT"
+          checked={settings.costEnteredExVat}
+          onChange={(checked) => setSetting("costEnteredExVat", checked)}
+        />
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={settings.includeEstimatedVatOnSale}
-            onChange={(e) =>
-              setSetting("includeEstimatedVatOnSale", e.target.checked)
-            }
-          />
-          Include VAT On Sale
-        </label>
+        <SwitchField
+          label="Include VAT On Sale"
+          checked={settings.includeEstimatedVatOnSale}
+          onChange={(checked) => setSetting("includeEstimatedVatOnSale", checked)}
+        />
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={settings.onlyShowQualified}
-            onChange={(e) => setSetting("onlyShowQualified", e.target.checked)}
-          />
-          Show Qualified Only
-        </label>
+        <SwitchField
+          label="Show Qualified Only"
+          checked={settings.onlyShowQualified}
+          onChange={(checked) => setSetting("onlyShowQualified", checked)}
+        />
       </div>
     </section>
   );
@@ -258,8 +241,41 @@ function Field({
 }) {
   return (
     <label className="block space-y-1">
-      <span className="text-gray-200">{label}</span>
+      <span className="text-zinc-300">{label}</span>
       {children}
     </label>
+  );
+}
+
+function SwitchField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="flex items-center gap-3 rounded-md border border-zinc-800 bg-black px-3 py-2 text-left"
+    >
+      <span
+        className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+          checked ? "bg-zinc-300" : "bg-zinc-700"
+        }`}
+      >
+        <span
+          className={`inline-block h-6 w-6 transform rounded-full bg-black transition ${
+            checked ? "translate-x-6" : "translate-x-0.5"
+          }`}
+        />
+      </span>
+      <span className="text-zinc-100">{label}</span>
+    </button>
   );
 }

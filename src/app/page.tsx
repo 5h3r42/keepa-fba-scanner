@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { useDashboardSettings } from "@/lib/dashboard-settings";
 import { DashboardSettingsPanel } from "@/components/dashboard-settings-panel";
@@ -135,6 +135,41 @@ type MatchSummary = {
   unmatched: number;
   fallbackAttempted: number;
   fallbackCapped: number;
+};
+
+type ScanQueueProgress = {
+  stage: "idle" | "preparing" | "processing" | "complete" | "error";
+  totalCandidates: number;
+  processedCandidates: number;
+  totalBatches: number;
+  completedBatches: number;
+  matchedLive: number;
+  message: string;
+};
+
+type SavedScan = {
+  id: string;
+  name: string;
+  createdAt: string;
+  modeLabel: string;
+  products: Product[];
+  matchSummary: MatchSummary | null;
+};
+
+const SAVED_SCANS_STORAGE_KEY = "keepa-saved-scans-v1";
+const CURRENT_SCAN_STORAGE_KEY = "keepa-current-scan-v1";
+const MAX_SAVED_SCANS = 10;
+const MAX_SAVED_SCAN_ROWS = 1000;
+const LIVE_FALLBACK_BATCH_SIZE = 100;
+
+type CurrentScanSnapshot = {
+  products: Product[];
+  matchSummary: MatchSummary | null;
+  keepaMetaText: string;
+  keepaCsvStatus: string;
+  supplierFileName: string;
+  keepaExportFileName: string;
+  lastRunModeLabel: string;
 };
 
 const PRODUCT_KEYS = [
@@ -443,25 +478,246 @@ const parseWorkbookFromFile = async (file: File) => {
     : XLSX.read(await file.arrayBuffer(), { type: "array" });
 };
 
+const compactProductForSave = (product: Product): Product => ({
+  ...product,
+  product: product.product.slice(0, 180),
+  status: product.status.slice(0, 80),
+});
+
+const compactProductsForSave = (items: Product[]): Product[] =>
+  items.slice(0, MAX_SAVED_SCAN_ROWS).map(compactProductForSave);
+
+const makeSafeFileName = (value: string): string =>
+  value
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .toLowerCase();
+
 export default function Page() {
-  const { settings, activeView, scanModalOpen, setScanModalOpen } =
+  const {
+    settings,
+    activeView,
+    setActiveView,
+    scanModalOpen,
+    setScanModalOpen,
+    saveScanSignal,
+  } =
     useDashboardSettings();
 
   const [supplierFile, setSupplierFile] = useState<File | null>(null);
   const [keepaExportFile, setKeepaExportFile] = useState<File | null>(null);
+  const [supplierFileName, setSupplierFileName] = useState("");
+  const [keepaExportFileName, setKeepaExportFileName] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
   const [matchSummary, setMatchSummary] = useState<MatchSummary | null>(null);
   const [keepaMetaText, setKeepaMetaText] = useState("");
   const [keepaCsvStatus, setKeepaCsvStatus] = useState("");
+  const [keepaCsvParsing, setKeepaCsvParsing] = useState(false);
+  const [scanProgressText, setScanProgressText] = useState("");
+  const [lastRunModeLabel, setLastRunModeLabel] = useState("");
+  const [savedScans, setSavedScans] = useState<SavedScan[]>([]);
+  const [saveNotice, setSaveNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [queueProgress, setQueueProgress] = useState<ScanQueueProgress>({
+    stage: "idle",
+    totalCandidates: 0,
+    processedCandidates: 0,
+    totalBatches: 0,
+    completedBatches: 0,
+    matchedLive: 0,
+    message: "",
+  });
   const [error, setError] = useState("");
   const [sortConfig, setSortConfig] = useState<SortConfig>(null);
+  const [scanStateLoaded, setScanStateLoaded] = useState(false);
+  const lastHandledSaveSignalRef = useRef(0);
+  const actionButtonClass =
+    "inline-flex h-14 items-center rounded-xl border border-zinc-700 bg-zinc-900 px-8 text-[15px] font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500";
+  const compactActionButtonClass =
+    "rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 transition hover:bg-zinc-800";
 
   const formatCurrency = (value: number) => `£${value.toFixed(2)}`;
 
   const modeLabel = keepaExportFile
-    ? "CSV-first + live fallback (cap 100)"
+    ? "CSV-first + live fallback queue"
     : "Live-only (no Keepa CSV provided)";
+  const displayModeLabel =
+    !keepaExportFile && products.length > 0 && lastRunModeLabel
+      ? lastRunModeLabel
+      : modeLabel;
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SAVED_SCANS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as SavedScan[];
+      if (Array.isArray(parsed)) {
+        setSavedScans(parsed);
+      }
+    } catch {
+      // Ignore malformed saved scan storage.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CURRENT_SCAN_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<CurrentScanSnapshot>;
+      if (Array.isArray(parsed.products)) {
+        setProducts(parsed.products as Product[]);
+      }
+      if (parsed.matchSummary) {
+        setMatchSummary(parsed.matchSummary as MatchSummary);
+      }
+      if (typeof parsed.keepaMetaText === "string") {
+        setKeepaMetaText(parsed.keepaMetaText);
+      }
+      if (typeof parsed.keepaCsvStatus === "string") {
+        setKeepaCsvStatus(parsed.keepaCsvStatus);
+      }
+      if (typeof parsed.supplierFileName === "string") {
+        setSupplierFileName(parsed.supplierFileName);
+      }
+      if (typeof parsed.keepaExportFileName === "string") {
+        setKeepaExportFileName(parsed.keepaExportFileName);
+      }
+      if (typeof parsed.lastRunModeLabel === "string") {
+        setLastRunModeLabel(parsed.lastRunModeLabel);
+      }
+    } catch {
+      // Ignore malformed scan snapshot storage.
+    } finally {
+      setScanStateLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!scanStateLoaded) return;
+
+    const compactProducts = compactProductsForSave(products);
+    const snapshot: CurrentScanSnapshot = {
+      products: compactProducts,
+      matchSummary,
+      keepaMetaText,
+      keepaCsvStatus,
+      supplierFileName,
+      keepaExportFileName,
+      lastRunModeLabel,
+    };
+
+    try {
+      localStorage.setItem(CURRENT_SCAN_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      try {
+        localStorage.setItem(
+          CURRENT_SCAN_STORAGE_KEY,
+          JSON.stringify({ ...snapshot, products: compactProducts.slice(0, 200) }),
+        );
+      } catch {
+        // Ignore storage quota failures.
+      }
+    }
+  }, [
+    scanStateLoaded,
+    products,
+    matchSummary,
+    keepaMetaText,
+    keepaCsvStatus,
+    supplierFileName,
+    keepaExportFileName,
+    lastRunModeLabel,
+  ]);
+
+  const persistSavedScans = (next: SavedScan[]): boolean => {
+    let candidate = [...next];
+    while (candidate.length > 0) {
+      try {
+        localStorage.setItem(SAVED_SCANS_STORAGE_KEY, JSON.stringify(candidate));
+        setSavedScans(candidate);
+        return true;
+      } catch {
+        candidate = candidate.slice(0, -1);
+      }
+    }
+
+    setSavedScans([]);
+    return false;
+  };
+
+  const saveCurrentScan = useCallback(() => {
+    if (products.length === 0) {
+      setSaveNotice("No scan results to save yet.");
+      return;
+    }
+
+    const scan: SavedScan = {
+      id: `${Date.now()}`,
+      name: `Scan ${new Date().toLocaleString()}`,
+      createdAt: new Date().toISOString(),
+      modeLabel,
+      products: compactProductsForSave(products),
+      matchSummary,
+    };
+    const next = [scan, ...savedScans].slice(0, MAX_SAVED_SCANS);
+    const saved = persistSavedScans(next);
+    setSaveNotice(
+      saved
+        ? `Saved: ${scan.name}${products.length > MAX_SAVED_SCAN_ROWS ? ` (first ${MAX_SAVED_SCAN_ROWS} rows)` : ""}`
+        : "Could not save scan. Browser storage is full.",
+    );
+  }, [products, modeLabel, matchSummary, savedScans]);
+
+  useEffect(() => {
+    if (saveScanSignal === 0) return;
+    if (lastHandledSaveSignalRef.current === saveScanSignal) return;
+    lastHandledSaveSignalRef.current = saveScanSignal;
+    saveCurrentScan();
+  }, [saveScanSignal, saveCurrentScan]);
+
+  const loadSavedScan = (scan: SavedScan) => {
+    setProducts(scan.products);
+    setMatchSummary(scan.matchSummary);
+    setError("");
+    setKeepaMetaText("");
+    setSaveNotice(`Loaded: ${scan.name}`);
+    setActiveView("dashboard");
+  };
+
+  const deleteSavedScan = (id: string) => {
+    const next = savedScans.filter((scan) => scan.id !== id);
+    persistSavedScans(next);
+  };
+
+  const downloadSavedScan = (scan: SavedScan) => {
+    const rows = scan.products.map((p) => ({
+      Product: p.product,
+      Barcode: p.barcode,
+      ASIN: p.asin,
+      BSR: p.bsr || "",
+      "BSR Drops 90d": p.bsrDrops90d || "",
+      "Cost (GBP)": p.cost,
+      "Sell Price (GBP)": p.sellPrice || "",
+      "Buy Box 90d Avg (GBP)": p.buyBox90dAvg || "",
+      "New Offers": p.newOfferCount || "",
+      "Amazon In Stock %": p.amazonInStockPercent || "",
+      "Referral Fee (GBP)": p.referralFee || "",
+      "FBA Fee (GBP)": p.fbaFee || "",
+      "Max Buy Cost (GBP)": p.maxBuyCost || "",
+      "Profit (GBP)": p.profit || "",
+      "ROI (%)": p.roi || "",
+      "Match Source": p.matchSource,
+      Status: p.status,
+      Qualified: p.matchesCriteria ? "Yes" : "No",
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Saved Scan");
+    const fileName = `${makeSafeFileName(scan.name)}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
+  };
 
   const fetchLiveKeepa = async (asins: string[], barcodes: string[]) => {
     if (asins.length === 0 && barcodes.length === 0) {
@@ -532,15 +788,27 @@ export default function Page() {
   };
 
   const runScan = async () => {
-    if (!supplierFile) return;
+    if (!supplierFile) {
+      setError("Please select a supplier file first.");
+      return;
+    }
 
     setLoading(true);
     setError("");
     setKeepaMetaText("");
-    setProducts([]);
-    setMatchSummary(null);
+    setScanProgressText("Starting scan...");
+    setQueueProgress({
+      stage: "preparing",
+      totalCandidates: 0,
+      processedCandidates: 0,
+      totalBatches: 0,
+      completedBatches: 0,
+      matchedLive: 0,
+      message: "Preparing queue...",
+    });
 
     try {
+      setScanProgressText("Reading supplier file...");
       const supplierWorkbook = await parseWorkbookFromFile(supplierFile);
       const supplierSheet = supplierWorkbook.Sheets[supplierWorkbook.SheetNames[0]];
       const supplierRows = parseSupplierRows(supplierSheet);
@@ -549,12 +817,14 @@ export default function Page() {
       let keepaByBarcode: Record<string, KeepaCsvRowNormalized> = {};
 
       if (keepaExportFile) {
+        setScanProgressText("Reading Keepa CSV...");
         const keepaWorkbook = await parseWorkbookFromFile(keepaExportFile);
         const keepaSheet = keepaWorkbook.Sheets[keepaWorkbook.SheetNames[0]];
         const keepaRows = parseKeepaCsvRows(keepaSheet);
         ({ keepaByAsin, keepaByBarcode } = buildKeepaCsvIndex(keepaRows));
       }
 
+      setScanProgressText("Merging supplier rows...");
       const merged = supplierRows.map((s) => {
         let keepaCsvMatch: KeepaCsvRowNormalized | undefined;
         let matchSource: MatchSource = "unmatched";
@@ -584,32 +854,87 @@ export default function Page() {
       });
 
       const unmatchedRows = merged.filter((row) => row.matchSource === "unmatched");
-      const fallbackCandidates = unmatchedRows.slice(0, 100);
-      const fallbackCapped = Math.max(0, unmatchedRows.length - fallbackCandidates.length);
-
-      const fallbackAsins = Array.from(
-        new Set(
-          fallbackCandidates
-            .map((row) => row.supplier.asin)
-            .filter((asin) => /^[A-Z0-9]{10}$/.test(asin)),
-        ),
+      const fallbackCandidates = unmatchedRows;
+      const fallbackCapped = 0;
+      const totalBatches = Math.ceil(
+        fallbackCandidates.length / LIVE_FALLBACK_BATCH_SIZE,
       );
-      const fallbackCodes = Array.from(
-        new Set(
-          fallbackCandidates
-            .map((row) => row.supplier.barcodeCanonical)
-            .filter(Boolean),
-        ),
-      );
+      const liveByKey: Record<string, KeepaLiveEnriched> = {};
+      let matchedLive = 0;
+      let latestMetaText = "";
 
-      const liveResult = await fetchLiveKeepa(fallbackAsins, fallbackCodes);
-      setKeepaMetaText(liveResult.metaText);
+      setQueueProgress({
+        stage: "processing",
+        totalCandidates: fallbackCandidates.length,
+        processedCandidates: 0,
+        totalBatches,
+        completedBatches: 0,
+        matchedLive: 0,
+        message:
+          fallbackCandidates.length > 0
+            ? "Running live Keepa fallback queue..."
+            : "No live fallback needed.",
+      });
+
+      for (let i = 0; i < fallbackCandidates.length; i += LIVE_FALLBACK_BATCH_SIZE) {
+        const chunk = fallbackCandidates.slice(i, i + LIVE_FALLBACK_BATCH_SIZE);
+        const fallbackAsins = Array.from(
+          new Set(
+            chunk
+              .map((row) => row.supplier.asin)
+              .filter((asin) => /^[A-Z0-9]{10}$/.test(asin)),
+          ),
+        );
+        const fallbackCodes = Array.from(
+          new Set(
+            chunk.map((row) => row.supplier.barcodeCanonical).filter(Boolean),
+          ),
+        );
+
+        if (fallbackAsins.length > 0 || fallbackCodes.length > 0) {
+          const liveResult = await fetchLiveKeepa(fallbackAsins, fallbackCodes);
+          if (liveResult.metaText) latestMetaText = liveResult.metaText;
+          Object.assign(liveByKey, liveResult.byKey);
+
+          for (const row of chunk) {
+            const hit =
+              liveResult.byKey[row.supplier.asin] ||
+              liveResult.byKey[row.supplier.barcodeCanonical];
+            if (hit) matchedLive += 1;
+          }
+        }
+
+        const processed = Math.min(
+          fallbackCandidates.length,
+          i + LIVE_FALLBACK_BATCH_SIZE,
+        );
+        const completedBatches = Math.min(
+          totalBatches,
+          Math.ceil(processed / LIVE_FALLBACK_BATCH_SIZE),
+        );
+
+        setScanProgressText(
+          `Running live Keepa fallback... batch ${completedBatches}/${totalBatches || 1}`,
+        );
+        setQueueProgress({
+          stage: "processing",
+          totalCandidates: fallbackCandidates.length,
+          processedCandidates: processed,
+          totalBatches,
+          completedBatches,
+          matchedLive,
+          message: `Processed ${processed}/${fallbackCandidates.length} unmatched rows`,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      setKeepaMetaText(latestMetaText);
 
       const finalized = merged.map((row) => {
         const liveMatch =
           row.matchSource === "unmatched"
-            ? liveResult.byKey[row.supplier.asin] ||
-              liveResult.byKey[row.supplier.barcodeCanonical]
+            ? liveByKey[row.supplier.asin] || liveByKey[row.supplier.barcodeCanonical]
             : undefined;
 
         const effectiveMatchSource: MatchSource =
@@ -739,10 +1064,29 @@ export default function Page() {
 
       setProducts(finalized);
       setMatchSummary(summary);
+      setQueueProgress({
+        stage: "complete",
+        totalCandidates: fallbackCandidates.length,
+        processedCandidates: fallbackCandidates.length,
+        totalBatches,
+        completedBatches: totalBatches,
+        matchedLive: finalized.filter((p) => p.matchSource === "live_keepa").length,
+        message: "Background queue complete.",
+      });
+      setSupplierFileName(supplierFile.name);
+      setKeepaExportFileName(keepaExportFile?.name ?? "");
+      setLastRunModeLabel(modeLabel);
+      setScanProgressText("Scan complete.");
       setScanModalOpen(false);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Scan failed";
       setError(message);
+      setScanProgressText("Scan failed.");
+      setQueueProgress((prev) => ({
+        ...prev,
+        stage: "error",
+        message: message,
+      }));
     } finally {
       setLoading(false);
     }
@@ -788,15 +1132,20 @@ export default function Page() {
   const onSupplierFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     setSupplierFile(file);
+    setSupplierFileName(file?.name ?? "");
   };
 
   const onKeepaFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     setKeepaExportFile(file);
+    setKeepaExportFileName(file?.name ?? "");
     setKeepaCsvStatus("");
+    setKeepaCsvParsing(false);
     if (!file) return;
 
     try {
+      setKeepaCsvParsing(true);
+      setKeepaCsvStatus("Parsing Keepa CSV...");
       const workbook = await parseWorkbookFromFile(file);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const keepaRows = parseKeepaCsvRows(sheet);
@@ -807,45 +1156,156 @@ export default function Page() {
       );
     } catch {
       setKeepaCsvStatus("Failed to parse Keepa CSV. Check file format.");
+    } finally {
+      setKeepaCsvParsing(false);
     }
   };
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-4">
+      <h1 className="mb-4 text-3xl font-semibold tracking-tight">
         {activeView === "settings"
           ? "Dashboard Settings"
-          : "Amazon FBA ROI Dashboard (UK Accurate Fees)"}
+          : activeView === "saved"
+            ? "Saved Scans"
+            : "Dashboard"}
       </h1>
 
       {activeView === "settings" ? (
         <DashboardSettingsPanel />
+      ) : activeView === "saved" ? (
+        <section className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+          <p className="mb-4 text-sm text-zinc-300">
+            Saved scans are stored locally in your browser.
+          </p>
+          {savedScans.length === 0 ? (
+            <p className="text-sm text-zinc-400">No saved scans yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {savedScans.map((scan) => (
+                <div
+                  key={scan.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-black px-4 py-3"
+                >
+                  <div>
+                    <p className="font-medium text-zinc-100">{scan.name}</p>
+                    <p className="text-xs text-zinc-400">
+                      {new Date(scan.createdAt).toLocaleString()} | {scan.products.length} rows | {scan.modeLabel}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => loadSavedScan(scan)}
+                      className={compactActionButtonClass}
+                    >
+                      Open
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadSavedScan(scan)}
+                      className={compactActionButtonClass}
+                    >
+                      Download
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteSavedScan(scan.id)}
+                      className={compactActionButtonClass}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       ) : (
         <>
-          <p className="mb-3 text-sm text-blue-200">Mode: {modeLabel}</p>
+          <p className="mb-4 inline-flex rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300">
+            Mode: {displayModeLabel}
+          </p>
+          {saveNotice && <p className="mb-3 text-sm text-emerald-300">{saveNotice}</p>}
 
-          <div className="mb-4">
+          <div className="mb-5 flex flex-wrap gap-3">
             <button
               type="button"
               onClick={() => setScanModalOpen(true)}
-              className="bg-blue-600 px-5 py-3 rounded"
+              className={actionButtonClass}
             >
               Open Scan Window
             </button>
+            <button
+              type="button"
+              onClick={runScan}
+              disabled={!supplierFile || loading}
+              className={actionButtonClass}
+            >
+              <span className="inline-flex items-center gap-2">
+                {loading ? <Spinner /> : null}
+                {loading ? "Scanning..." : "Run Scan"}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={saveCurrentScan}
+              disabled={products.length === 0}
+              className={actionButtonClass}
+            >
+              Save Current Scan
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveView("saved")}
+              className={actionButtonClass}
+            >
+              View Saved Scans ({savedScans.length})
+            </button>
           </div>
 
-          {supplierFile && (
-            <p className="mb-1 text-gray-300">Supplier: {supplierFile.name}</p>
+          {(supplierFile || supplierFileName) && (
+            <p className="mb-1 text-sm text-zinc-300">
+              Supplier: {supplierFile?.name ?? supplierFileName}
+            </p>
           )}
-          {keepaExportFile && (
-            <p className="mb-1 text-gray-300">Keepa CSV: {keepaExportFile.name}</p>
+          {(keepaExportFile || keepaExportFileName) && (
+            <p className="mb-1 text-sm text-zinc-300">
+              Keepa CSV: {keepaExportFile?.name ?? keepaExportFileName}
+            </p>
           )}
-          {keepaCsvStatus && <p className="mb-1 text-blue-200">{keepaCsvStatus}</p>}
-          {keepaMetaText && <p className="mb-3 text-blue-200">{keepaMetaText}</p>}
-          {error && <p className="mb-3 text-red-300">{error}</p>}
+          {keepaCsvStatus && <p className="mb-1 text-sm text-zinc-300">{keepaCsvStatus}</p>}
+          {keepaMetaText && <p className="mb-3 text-sm text-zinc-300">{keepaMetaText}</p>}
+          {error && <p className="mb-3 text-sm text-red-300">{error}</p>}
+          {queueProgress.totalCandidates > 0 && (
+            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3">
+              <p className="text-sm text-zinc-200">
+                Queue: {queueProgress.completedBatches}/{queueProgress.totalBatches} batches
+                | {queueProgress.processedCandidates}/{queueProgress.totalCandidates} rows
+                | Live matched: {queueProgress.matchedLive}
+              </p>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded bg-zinc-800">
+                <div
+                  className="h-full bg-zinc-400 transition-all"
+                  style={{
+                    width: `${
+                      queueProgress.totalCandidates > 0
+                        ? Math.round(
+                            (queueProgress.processedCandidates /
+                              queueProgress.totalCandidates) *
+                              100,
+                          )
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+              <p className="mt-2 text-xs text-zinc-400">{queueProgress.message}</p>
+            </div>
+          )}
 
           {matchSummary && (
-            <div className="mb-4 rounded border border-[#2b4569] bg-[#173259] px-4 py-3 text-sm">
+            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-200">
               <p>
                 Total: {matchSummary.total} | CSV ASIN: {matchSummary.csvAsin} |
                 CSV Barcode: {matchSummary.csvBarcode} | Live fallback: {matchSummary.live} |
@@ -860,111 +1320,132 @@ export default function Page() {
             </div>
           )}
 
-          <div className="bg-[#1f2e45] rounded overflow-x-auto">
+          <div className="overflow-x-auto rounded-2xl border border-zinc-800 bg-black">
             <table className="w-full min-w-[1900px] text-left table-fixed">
-              <thead className="bg-[#26364f]">
+              <thead className="bg-zinc-800/90">
                 <tr>
                   <th className="p-4 w-[20%]">
                     <SortHeader label="Product" icon={sortIcon("product")} onClick={() => toggleSort("product")} />
                   </th>
-                  <th className="px-3 py-4 w-[9%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[9%] border-l border-zinc-700">
                     <SortHeader label="Barcode" icon={sortIcon("barcode")} onClick={() => toggleSort("barcode")} />
                   </th>
-                  <th className="px-3 py-4 w-[8%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[8%] border-l border-zinc-700">
                     <SortHeader label="ASIN" icon={sortIcon("asin")} onClick={() => toggleSort("asin")} />
                   </th>
-                  <th className="px-3 py-4 w-[10%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[10%] border-l border-zinc-700">
                     <SortHeader label="Match Source" icon={sortIcon("matchSource")} onClick={() => toggleSort("matchSource")} />
                   </th>
-                  <th className="px-3 py-4 w-[11%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[11%] border-l border-zinc-700">
                     <SortHeader label="Status" icon={sortIcon("status")} onClick={() => toggleSort("status")} />
                   </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
                     <SortHeader label="BSR" icon={sortIcon("bsr")} onClick={() => toggleSort("bsr")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="BSR Drops 90d" icon={sortIcon("bsrDrops90d")} onClick={() => toggleSort("bsrDrops90d")} />
                   </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
                     <SortHeader label="Cost" icon={sortIcon("cost")} onClick={() => toggleSort("cost")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="Sell Price" icon={sortIcon("sellPrice")} onClick={() => toggleSort("sellPrice")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="Buy Box 90d Avg" icon={sortIcon("buyBox90dAvg")} onClick={() => toggleSort("buyBox90dAvg")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="New Offers" icon={sortIcon("newOfferCount")} onClick={() => toggleSort("newOfferCount")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="Amazon In Stock %" icon={sortIcon("amazonInStockPercent")} onClick={() => toggleSort("amazonInStockPercent")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="Referral Fee" icon={sortIcon("referralFee")} onClick={() => toggleSort("referralFee")} />
                   </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
                     <SortHeader label="FBA Fee" icon={sortIcon("fbaFee")} onClick={() => toggleSort("fbaFee")} />
                   </th>
-                  <th className="px-3 py-4 w-[6%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[6%] border-l border-zinc-700">
                     <SortHeader label="Max Buy Cost" icon={sortIcon("maxBuyCost")} onClick={() => toggleSort("maxBuyCost")} />
                   </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
                     <SortHeader label="Profit" icon={sortIcon("profit")} onClick={() => toggleSort("profit")} />
                   </th>
-                  <th className="px-3 py-4 w-[5%] border-l border-[#3a4f6f]">
+                  <th className="px-3 py-4 w-[5%] border-l border-zinc-700">
                     <SortHeader label="ROI" icon={sortIcon("roi")} onClick={() => toggleSort("roi")} />
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {sortedProducts.map((p, index) => (
-                  <tr key={`${p.barcode}-${p.asin}-${index}`} className="border-t border-gray-600">
+                  <tr
+                    key={`${p.barcode}-${p.asin}-${index}`}
+                    className="border-t border-zinc-800 bg-black hover:bg-zinc-950/80"
+                  >
                     <td className="p-4 max-w-0">
-                      <span className="block truncate" title={p.product}>
-                        {p.product}
+                      {p.asin ? (
+                        <a
+                          href={`https://www.amazon.co.uk/dp/${p.asin}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block truncate text-zinc-100 underline-offset-2 hover:underline"
+                          title={p.product}
+                        >
+                          {p.product}
+                        </a>
+                      ) : (
+                        <span className="block truncate" title={p.product}>
+                          {p.product}
+                        </span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-slate-800">{p.barcode || "-"}</td>
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.asin || "-"}</td>
+                    <td className="px-3 py-4 border-l border-zinc-800">
+                      <span
+                        className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-slate-300"
+                        title={p.matchSource}
+                      >
+                        <span className="truncate">{p.matchSource}</span>
                       </span>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">{p.barcode || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">{p.asin || "-"}</td>
-                    <td className="px-3 py-4 border-l border-[#314562]">
-                      <span className="block truncate" title={p.matchSource}>
-                        {p.matchSource}
+                    <td className="px-3 py-4 border-l border-zinc-800">
+                      <span
+                        className="inline-flex max-w-full items-center rounded-full border border-zinc-700 px-3 py-1 text-slate-300"
+                        title={p.status}
+                      >
+                        <span className="truncate">{p.status}</span>
                       </span>
                     </td>
-                    <td className="px-3 py-4 border-l border-[#314562]">
-                      <span className="block truncate" title={p.status}>
-                        {p.status}
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">{p.bsr || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">{p.bsrDrops90d || "-"}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">{formatCurrency(p.cost)}</td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.bsr || "-"}</td>
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{p.bsrDrops90d || "-"}</td>
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">{formatCurrency(p.cost)}</td>
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.sellPrice ? formatCurrency(p.sellPrice) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.buyBox90dAvg ? formatCurrency(p.buyBox90dAvg) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.newOfferCount || "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.amazonInStockPercent ? `${p.amazonInStockPercent.toFixed(0)}%` : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.referralFee ? formatCurrency(p.referralFee) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.fbaFee ? formatCurrency(p.fbaFee) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.maxBuyCost ? formatCurrency(p.maxBuyCost) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.sellPrice ? formatCurrency(p.profit) : "-"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 border-l border-[#314562]">
+                    <td className="whitespace-nowrap px-3 py-4 border-l border-zinc-800">
                       {p.sellPrice && p.cost > 0 ? `${p.roi.toFixed(1)}%` : "-"}
                     </td>
                   </tr>
@@ -974,10 +1455,10 @@ export default function Page() {
           </div>
 
           {scanModalOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-              <div className="w-full max-w-xl rounded-xl border border-[#2c4467] bg-[#132b50] p-6 shadow-2xl">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+              <div className="w-full max-w-xl rounded-xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
                 <h2 className="text-xl font-semibold mb-4">Scan Files</h2>
-                <p className="text-sm text-blue-200 mb-4">
+                <p className="mb-4 text-sm text-zinc-300">
                   Add supplier and Keepa files, then run scan.
                 </p>
 
@@ -988,7 +1469,7 @@ export default function Page() {
                       type="file"
                       accept=".xlsx,.xls,.csv"
                       onChange={onSupplierFileChange}
-                      className="block w-full text-sm file:mr-3 file:rounded file:border-0 file:bg-[#2f4b72] file:px-3 file:py-2 file:text-white"
+                      className="block w-full text-sm text-zinc-300 file:mr-3 file:rounded-md file:border file:border-zinc-700 file:bg-zinc-900 file:px-3 file:py-2 file:font-medium file:text-zinc-100 file:transition hover:file:bg-zinc-800"
                     />
                   </label>
 
@@ -998,24 +1479,64 @@ export default function Page() {
                       type="file"
                       accept=".csv"
                       onChange={onKeepaFileChange}
-                      className="block w-full text-sm file:mr-3 file:rounded file:border-0 file:bg-[#2f4b72] file:px-3 file:py-2 file:text-white"
+                      className="block w-full text-sm text-zinc-300 file:mr-3 file:rounded-md file:border file:border-zinc-700 file:bg-zinc-900 file:px-3 file:py-2 file:font-medium file:text-zinc-100 file:transition hover:file:bg-zinc-800"
                     />
                   </label>
                 </div>
 
-                {supplierFile && (
-                  <p className="mt-3 text-sm text-gray-300">Supplier: {supplierFile.name}</p>
+                {(supplierFile || supplierFileName) && (
+                  <p className="mt-3 text-sm text-zinc-300">
+                    Supplier: {supplierFile?.name ?? supplierFileName}
+                  </p>
                 )}
-                {keepaExportFile && (
-                  <p className="text-sm text-gray-300">Keepa CSV: {keepaExportFile.name}</p>
+                {(keepaExportFile || keepaExportFileName) && (
+                  <p className="text-sm text-zinc-300">
+                    Keepa CSV: {keepaExportFile?.name ?? keepaExportFileName}
+                  </p>
                 )}
-                {keepaCsvStatus && <p className="mt-2 text-sm text-blue-200">{keepaCsvStatus}</p>}
+                {keepaCsvStatus && (
+                  <p className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
+                    {keepaCsvParsing ? <Spinner /> : null}
+                    <span>{keepaCsvStatus}</span>
+                  </p>
+                )}
+                {scanProgressText && (
+                  <p className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
+                    {loading ? <Spinner /> : null}
+                    <span>{scanProgressText}</span>
+                  </p>
+                )}
+                {queueProgress.stage === "processing" && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-black p-3">
+                    <p className="text-xs text-zinc-300">
+                      Queue: {queueProgress.completedBatches}/{queueProgress.totalBatches} batches
+                      | {queueProgress.processedCandidates}/{queueProgress.totalCandidates} rows
+                    </p>
+                    <div className="mt-2 h-2 w-full overflow-hidden rounded bg-zinc-800">
+                      <div
+                        className="h-full bg-zinc-400 transition-all"
+                        style={{
+                          width: `${
+                            queueProgress.totalCandidates > 0
+                              ? Math.round(
+                                  (queueProgress.processedCandidates /
+                                    queueProgress.totalCandidates) *
+                                    100,
+                                )
+                              : 0
+                          }%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {error && <p className="mt-2 text-sm text-red-300">{error}</p>}
 
                 <div className="mt-5 flex justify-end gap-3">
                   <button
                     type="button"
                     onClick={() => setScanModalOpen(false)}
-                    className="rounded bg-[#253f64] px-4 py-2 text-sm"
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition hover:bg-zinc-800"
                   >
                     Close
                   </button>
@@ -1023,9 +1544,12 @@ export default function Page() {
                     type="button"
                     onClick={runScan}
                     disabled={!supplierFile || loading}
-                    className="rounded bg-blue-600 px-4 py-2 text-sm disabled:bg-blue-900 disabled:cursor-not-allowed"
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
                   >
-                    {loading ? "Scanning..." : "Run Scan"}
+                    <span className="inline-flex items-center gap-2">
+                      {loading ? <Spinner /> : null}
+                      {loading ? "Scanning..." : "Run Scan"}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -1050,10 +1574,19 @@ function SortHeader({
     <button
       type="button"
       onClick={onClick}
-      className="w-full flex items-center justify-between gap-2 text-left"
+      className="flex w-full items-center justify-between gap-2 text-left text-slate-100"
     >
       <span>{label}</span>
-      <span className="text-[12px] text-[#b7c6db]">{icon}</span>
+      <span className="text-[12px] text-slate-400">{icon}</span>
     </button>
+  );
+}
+
+function Spinner() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent"
+    />
   );
 }
