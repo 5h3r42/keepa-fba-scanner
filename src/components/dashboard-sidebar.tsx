@@ -3,10 +3,10 @@
 import { useDashboardSettings } from "@/lib/dashboard-settings";
 
 export function DashboardSidebar() {
-  const { activeView, setActiveView } = useDashboardSettings();
+  const { activeView, setActiveView, setScanModalOpen } = useDashboardSettings();
 
   return (
-    <aside className="w-72 bg-[#0f223f] border-r border-[#1e365d] p-6 overflow-y-auto">
+    <aside className="w-72 shrink-0 bg-[#0f223f] border-r border-[#1e365d] p-6 overflow-y-auto">
       <div className="mb-8">
         <div className="text-2xl font-bold text-blue-400">FBA AI</div>
       </div>
@@ -21,8 +21,19 @@ export function DashboardSidebar() {
 
       <button
         type="button"
+        onClick={() => {
+          setActiveView("dashboard");
+          setScanModalOpen(true);
+        }}
+        className="w-full mt-3 px-4 py-2 rounded-lg text-left transition bg-[#1e365d] hover:bg-[#24416d]"
+      >
+        Scan
+      </button>
+
+      <button
+        type="button"
         onClick={() => setActiveView("settings")}
-        className={`w-full px-4 py-2 rounded-lg text-left transition ${
+        className={`w-full mt-3 px-4 py-2 rounded-lg text-left transition ${
           activeView === "settings"
             ? "bg-[#24416d] ring-1 ring-blue-300"
             : "bg-[#1e365d] hover:bg-[#24416d]"

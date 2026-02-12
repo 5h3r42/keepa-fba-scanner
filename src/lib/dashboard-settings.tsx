@@ -60,6 +60,8 @@ type DashboardSettingsContextValue = {
   settings: DashboardSettings;
   activeView: DashboardView;
   setActiveView: (view: DashboardView) => void;
+  scanModalOpen: boolean;
+  setScanModalOpen: (open: boolean) => void;
   setSetting: <K extends keyof DashboardSettings>(
     key: K,
     value: DashboardSettings[K],
@@ -72,6 +74,7 @@ const DashboardSettingsContext =
 export function DashboardSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<DashboardSettings>(defaultSettings);
   const [activeView, setActiveView] = useState<DashboardView>("dashboard");
+  const [scanModalOpen, setScanModalOpen] = useState(false);
   const [loadedFromStorage, setLoadedFromStorage] = useState(false);
 
   useEffect(() => {
@@ -104,6 +107,8 @@ export function DashboardSettingsProvider({ children }: { children: ReactNode })
       settings,
       activeView,
       setActiveView,
+      scanModalOpen,
+      setScanModalOpen,
       setSetting: <K extends keyof DashboardSettings>(
         key: K,
         value: DashboardSettings[K],
@@ -111,7 +116,7 @@ export function DashboardSettingsProvider({ children }: { children: ReactNode })
         setSettings((prev) => ({ ...prev, [key]: value }));
       },
     }),
-    [settings, activeView],
+    [settings, activeView, scanModalOpen],
   );
 
   return (
