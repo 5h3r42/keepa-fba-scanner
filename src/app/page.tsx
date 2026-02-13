@@ -124,6 +124,7 @@ type DecisionFilters = {
   minProfit: string;
   maxBsr: string;
   status: string;
+  failReason: string;
   matchSources: MatchSource[];
 };
 
@@ -160,6 +161,24 @@ type ErrorDisplayParts = {
   rawPayload: string | null;
 };
 
+type DecisionFunnel = {
+  scanned: number;
+  matched: number;
+  criteriaPass: number;
+  failed: number;
+};
+
+type CurrentViewFunnel = {
+  scanned: number;
+  afterFilters: number;
+  activeTabRows: number;
+};
+
+type FailReasonStat = {
+  reason: string;
+  count: number;
+};
+
 const SAVED_SCANS_STORAGE_KEY = "keepa-saved-scans-v2";
 const CURRENT_SCAN_STORAGE_KEY = "keepa-current-scan-v2";
 const COLUMN_LAYOUT_STORAGE_KEY = "keepa-column-layout-v1";
@@ -170,7 +189,14 @@ const LIVE_FALLBACK_BATCH_SIZE = 100;
 const BARCODE_LIST_HARD_CAP = 2500;
 const BARCODE_INPUT_PERSIST_MAX_CHARS = 50_000;
 const BARCODE_INVALID_SAMPLE_LIMIT = 8;
+const TOP_FAIL_REASONS_LIMIT = 8;
 const SHOW_ERROR_PAYLOAD_BY_DEFAULT = false;
+const MATCH_SOURCE_OPTIONS: MatchSource[] = [
+  "keepa_csv_asin",
+  "keepa_csv_barcode",
+  "live_keepa",
+  "unmatched",
+];
 
 const DEFAULT_COLUMN_LAYOUT: ColumnLayoutItem[] = [
   { key: "product", visible: true },
@@ -249,6 +275,7 @@ const DEFAULT_FILTERS: DecisionFilters = {
   minProfit: "",
   maxBsr: "",
   status: "",
+  failReason: "",
   matchSources: [],
 };
 
@@ -289,6 +316,101 @@ const BUILTIN_PRESETS: DecisionFilterPreset[] = [
   },
 ];
 
+const normalizeDecisionFilters = (
+  input?: Partial<DecisionFilters> | null,
+): DecisionFilters => {
+  if (!input || typeof input !== "object") {
+    return {
+      ...DEFAULT_FILTERS,
+      matchSources: [],
+    };
+  }
+
+  const sourceSet = new Set(MATCH_SOURCE_OPTIONS);
+  const matchSources = Array.isArray(input.matchSources)
+    ? input.matchSources.filter((source): source is MatchSource => sourceSet.has(source))
+    : [];
+
+  return {
+    search: typeof input.search === "string" ? input.search : DEFAULT_FILTERS.search,
+    asin: typeof input.asin === "string" ? input.asin : DEFAULT_FILTERS.asin,
+    barcode: typeof input.barcode === "string" ? input.barcode : DEFAULT_FILTERS.barcode,
+    minRoi: typeof input.minRoi === "string" ? input.minRoi : DEFAULT_FILTERS.minRoi,
+    minProfit:
+      typeof input.minProfit === "string" ? input.minProfit : DEFAULT_FILTERS.minProfit,
+    maxBsr: typeof input.maxBsr === "string" ? input.maxBsr : DEFAULT_FILTERS.maxBsr,
+    status: typeof input.status === "string" ? input.status : DEFAULT_FILTERS.status,
+    failReason:
+      typeof input.failReason === "string" ? input.failReason : DEFAULT_FILTERS.failReason,
+    matchSources,
+  };
+};
+
+const normalizeDecisionFilterPreset = (
+  input: unknown,
+): DecisionFilterPreset | null => {
+  if (!input || typeof input !== "object") return null;
+
+  const value = input as Partial<DecisionFilterPreset>;
+  if (typeof value.id !== "string" || typeof value.name !== "string") return null;
+
+  return {
+    id: value.id,
+    name: value.name.trim().slice(0, 40),
+    filters: normalizeDecisionFilters(value.filters),
+  };
+};
+
+const computeAllRowsFunnel = (rows: Product[]): DecisionFunnel => {
+  const scanned = rows.length;
+  const matched = rows.filter((row) => row.matchSource !== "unmatched").length;
+  const criteriaPass = rows.filter((row) => row.matchesCriteria).length;
+  const failed = Math.max(0, scanned - criteriaPass);
+
+  return {
+    scanned,
+    matched,
+    criteriaPass,
+    failed,
+  };
+};
+
+const computeCurrentViewFunnel = (input: {
+  rows: Product[];
+  visibleRows: Product[];
+  unmatchedVisibleRows: Product[];
+  resultsTab: "results" | "unmatched";
+}): CurrentViewFunnel => ({
+  scanned: input.rows.length,
+  afterFilters: input.visibleRows.length,
+  activeTabRows:
+    input.resultsTab === "unmatched"
+      ? input.unmatchedVisibleRows.length
+      : input.visibleRows.length,
+});
+
+const topFailReasons = (rows: Product[], limit = TOP_FAIL_REASONS_LIMIT): FailReasonStat[] => {
+  const counts = new Map<string, number>();
+
+  for (const row of rows) {
+    for (const reason of row.failReasons) {
+      const normalized = reason.trim();
+      if (!normalized) continue;
+      counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+    }
+  }
+
+  return Array.from(counts.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+    .slice(0, limit);
+};
+
+const computeFailReasonStats = (rows: Product[], visibleRows: Product[]) => ({
+  allRowsReasons: topFailReasons(rows),
+  visibleRowsReasons: topFailReasons(visibleRows),
+});
+
 const compactProductForSave = (product: Product): Product => ({
   ...product,
   product: product.product.slice(0, 180),
@@ -309,6 +431,7 @@ const makeSafeFileName = (value: string): string =>
 const calcEstimatedApiCalls = (rows: number) => Math.max(0, Math.ceil(rows / LIVE_FALLBACK_BATCH_SIZE) * 2);
 
 const parseNumericFilter = (value: string): number | null => {
+  if (!value.trim()) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 };
@@ -396,6 +519,7 @@ const exportProductsToWorkbook = (
 export default function Page() {
   const {
     settings,
+    setSetting,
     activeView,
     setActiveView,
     scanModalOpen,
@@ -452,6 +576,9 @@ export default function Page() {
   const [decisionFilters, setDecisionFilters] = useState<DecisionFilters>(DEFAULT_FILTERS);
   const [customFilterPresets, setCustomFilterPresets] = useState<DecisionFilterPreset[]>([]);
   const [presetName, setPresetName] = useState("");
+  const [dashboardInfoTab, setDashboardInfoTab] = useState<"overview" | "details">(
+    "overview",
+  );
   const [resultsTab, setResultsTab] = useState<"results" | "unmatched">("results");
   const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
   const [manualOverrides, setManualOverrides] = useState<
@@ -665,9 +792,12 @@ export default function Page() {
     try {
       const raw = localStorage.getItem(FILTER_PRESET_STORAGE_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as DecisionFilterPreset[];
+      const parsed = JSON.parse(raw) as unknown[];
       if (!Array.isArray(parsed)) return;
-      setCustomFilterPresets(parsed);
+      const normalized = parsed
+        .map((preset) => normalizeDecisionFilterPreset(preset))
+        .filter((preset): preset is DecisionFilterPreset => Boolean(preset));
+      setCustomFilterPresets(normalized);
     } catch {
       // Ignore malformed filter presets.
     }
@@ -920,6 +1050,10 @@ export default function Page() {
     );
   };
 
+  const isBarcodeResultMode =
+    scanRunSummary?.scanInputMode === "barcode_list" ||
+    (products.length > 0 && scanInputMode === "barcode_list");
+
   const applyFilters = useCallback(
     (rows: Product[]) => {
       const minRoiFilter = parseNumericFilter(decisionFilters.minRoi);
@@ -929,9 +1063,10 @@ export default function Page() {
       const asin = decisionFilters.asin.trim().toUpperCase();
       const barcode = normalizeBarcode(decisionFilters.barcode);
       const status = decisionFilters.status.trim().toLowerCase();
+      const failReason = decisionFilters.failReason.trim().toLowerCase();
 
       return rows.filter((product) => {
-        if (settings.onlyShowQualified && !product.matchesCriteria) {
+        if (!isBarcodeResultMode && settings.onlyShowQualified && !product.matchesCriteria) {
           return false;
         }
 
@@ -951,6 +1086,12 @@ export default function Page() {
         }
 
         if (status && !product.status.toLowerCase().includes(status)) return false;
+        if (
+          failReason &&
+          !product.failReasons.some((reason) => reason.toLowerCase().includes(failReason))
+        ) {
+          return false;
+        }
 
         if (minRoiFilter !== null && product.roi < minRoiFilter) return false;
         if (minProfitFilter !== null && product.profit < minProfitFilter) return false;
@@ -959,7 +1100,7 @@ export default function Page() {
         return true;
       });
     },
-    [decisionFilters, settings.onlyShowQualified],
+    [decisionFilters, isBarcodeResultMode, settings.onlyShowQualified],
   );
 
   const visibleProducts = useMemo(() => applyFilters(products), [applyFilters, products]);
@@ -968,6 +1109,53 @@ export default function Page() {
     () => visibleProducts.filter((product) => product.matchSource === "unmatched"),
     [visibleProducts],
   );
+
+  const allRowsFunnel = useMemo(() => computeAllRowsFunnel(products), [products]);
+
+  const currentViewFunnel = useMemo(
+    () =>
+      computeCurrentViewFunnel({
+        rows: products,
+        visibleRows: visibleProducts,
+        unmatchedVisibleRows: unmatchedProducts,
+        resultsTab,
+      }),
+    [products, visibleProducts, unmatchedProducts, resultsTab],
+  );
+
+  const failReasonStats = useMemo(
+    () => computeFailReasonStats(products, visibleProducts),
+    [products, visibleProducts],
+  );
+  const qualifiedRowsCount = useMemo(
+    () => products.filter((product) => product.matchesCriteria).length,
+    [products],
+  );
+  const unmatchedRowsCount = useMemo(
+    () => products.filter((product) => product.matchSource === "unmatched").length,
+    [products],
+  );
+  const overviewTopFailReasons = useMemo(
+    () => failReasonStats.allRowsReasons.slice(0, 3),
+    [failReasonStats.allRowsReasons],
+  );
+  const overviewApiCalls = `${scanRunSummary?.actualApiCalls ?? 0} / ${
+    scanRunSummary?.estimatedApiCalls ?? 0
+  }`;
+  const activeFilterLabels = useMemo(() => {
+    const labels: string[] = [];
+    if (settings.onlyShowQualified) labels.push("Show Qualified Only");
+    if (decisionFilters.search.trim()) labels.push("Global Search");
+    if (decisionFilters.asin.trim()) labels.push("ASIN");
+    if (decisionFilters.barcode.trim()) labels.push("Barcode");
+    if (decisionFilters.status.trim()) labels.push("Status");
+    if (decisionFilters.failReason.trim()) labels.push("Fail Reason");
+    if (decisionFilters.minRoi.trim()) labels.push("Min ROI");
+    if (decisionFilters.minProfit.trim()) labels.push("Min Profit");
+    if (decisionFilters.maxBsr.trim()) labels.push("Max BSR");
+    if (decisionFilters.matchSources.length > 0) labels.push("Match Source");
+    return labels;
+  }, [decisionFilters, settings.onlyShowQualified]);
 
   const sortedProducts = useMemo(() => {
     const rows = resultsTab === "unmatched" ? unmatchedProducts : visibleProducts;
@@ -1466,8 +1654,15 @@ export default function Page() {
         : null;
 
       const asin = row.supplier.asin || row.keepaCsv?.asin || liveMatch?.asin || "";
+      const supplierTitle = row.supplier.productTitle.trim();
+      const barcodePlaceholderTitle =
+        input.scanInputMode === "barcode_list" && /^Barcode [0-9]{8,14}$/.test(supplierTitle);
       const productTitle =
-        row.supplier.productTitle || row.keepaCsv?.title || liveMatch?.title || "Untitled";
+        (input.scanInputMode === "barcode_list"
+          ? row.keepaCsv?.title ||
+            liveMatch?.title ||
+            (barcodePlaceholderTitle ? "" : supplierTitle)
+          : supplierTitle || row.keepaCsv?.title || liveMatch?.title) || "Untitled";
       const sellPrice =
         row.keepaCsv?.sellPrice || row.keepaCsv?.buyBoxCurrent || liveMatch?.sellPrice || 0;
       const bsr = row.keepaCsv?.bsr || liveMatch?.bsr || 0;
@@ -1610,6 +1805,19 @@ export default function Page() {
 
     const startedAt = Date.now();
     const scanRunId = crypto.randomUUID();
+
+    if (scanInputMode === "barcode_list") {
+      setResultsTab("results");
+      setCurrentPage(1);
+      setDecisionFilters((prev) =>
+        normalizeDecisionFilters({
+          ...DEFAULT_FILTERS,
+          minRoi: prev.minRoi,
+          minProfit: prev.minProfit,
+          maxBsr: prev.maxBsr,
+        }),
+      );
+    }
 
     setLoading(true);
     setError("");
@@ -1848,6 +2056,8 @@ export default function Page() {
       setSelectedRowIds([]);
       setMatchSummary(summary);
       setScanRunSummary(runSummary);
+      setResultsTab("results");
+      setCurrentPage(1);
       setQueueProgress({
         stage: "complete",
         totalCandidates: fallbackCandidates.length,
@@ -2121,7 +2331,7 @@ export default function Page() {
     const preset: DecisionFilterPreset = {
       id: `custom_${Date.now()}`,
       name,
-      filters: decisionFilters,
+      filters: normalizeDecisionFilters(decisionFilters),
     };
 
     setCustomFilterPresets((prev) => [preset, ...prev].slice(0, 20));
@@ -2129,11 +2339,28 @@ export default function Page() {
   };
 
   const applyFilterPreset = (preset: DecisionFilterPreset) => {
-    setDecisionFilters(preset.filters);
+    setDecisionFilters(normalizeDecisionFilters(preset.filters));
+    setCurrentPage(1);
   };
 
   const clearFilters = () => {
-    setDecisionFilters(DEFAULT_FILTERS);
+    setDecisionFilters(normalizeDecisionFilters());
+    setCurrentPage(1);
+  };
+
+  const onFailReasonChipClick = (reason: string) => {
+    setDecisionFilters((prev) =>
+      normalizeDecisionFilters({
+        ...prev,
+        failReason: prev.failReason === reason ? "" : reason,
+      }),
+    );
+    setCurrentPage(1);
+  };
+
+  const clearFailReasonFilter = () => {
+    setDecisionFilters((prev) => normalizeDecisionFilters({ ...prev, failReason: "" }));
+    setCurrentPage(1);
   };
 
   const clearResults = () => {
@@ -2380,23 +2607,116 @@ export default function Page() {
             </button>
           </div>
 
-          <div className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Total Rows" value={`${products.length}`} />
-            <MetricCard
-              label="Qualified"
-              value={`${products.filter((product) => product.matchesCriteria).length}`}
-            />
-            <MetricCard
-              label="Unmatched"
-              value={`${products.filter((product) => product.matchSource === "unmatched").length}`}
-            />
-            <MetricCard
-              label="API Calls"
-              value={`${scanRunSummary?.actualApiCalls ?? 0} / ${scanRunSummary?.estimatedApiCalls ?? 0}`}
-            />
-          </div>
+          <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+            <div
+              role="tablist"
+              aria-label="Dashboard information tabs"
+              className="inline-flex rounded-lg border border-zinc-700 bg-zinc-900 p-1"
+            >
+              <button
+                id="dashboard-info-tab-overview"
+                type="button"
+                role="tab"
+                aria-selected={dashboardInfoTab === "overview"}
+                aria-controls="dashboard-info-panel-overview"
+                onClick={() => setDashboardInfoTab("overview")}
+                className={`rounded-md px-3 py-1.5 text-sm transition ${
+                  dashboardInfoTab === "overview"
+                    ? "border border-zinc-600 bg-zinc-800 text-zinc-100 shadow-sm"
+                    : "text-zinc-400 hover:text-zinc-100"
+                }`}
+              >
+                Overview
+              </button>
+              <button
+                id="dashboard-info-tab-details"
+                type="button"
+                role="tab"
+                aria-selected={dashboardInfoTab === "details"}
+                aria-controls="dashboard-info-panel-details"
+                onClick={() => setDashboardInfoTab("details")}
+                className={`rounded-md px-3 py-1.5 text-sm transition ${
+                  dashboardInfoTab === "details"
+                    ? "border border-zinc-600 bg-zinc-800 text-zinc-100 shadow-sm"
+                    : "text-zinc-400 hover:text-zinc-100"
+                }`}
+              >
+                Details
+              </button>
+            </div>
+          </section>
 
-          <section className="mb-4 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+          {dashboardInfoTab === "overview" && (
+            <section
+              id="dashboard-info-panel-overview"
+              role="tabpanel"
+              aria-labelledby="dashboard-info-tab-overview"
+              className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+            >
+              {products.length === 0 ? (
+                <p className="text-sm text-zinc-400">Run a scan to see overview metrics.</p>
+              ) : (
+                <div className="space-y-4">
+                  <h2 className="text-base font-semibold text-zinc-100">Decision Clarity</h2>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <MetricCard label="Total Rows" value={`${products.length}`} />
+                    <MetricCard label="Qualified" value={`${qualifiedRowsCount}`} />
+                    <MetricCard label="Unmatched" value={`${unmatchedRowsCount}`} />
+                    <MetricCard label="API Calls" value={overviewApiCalls} />
+                  </div>
+
+                  <StatusCard title="Overview Funnel">
+                    <div className="flex flex-wrap gap-2">
+                      <StatusChip label="Scanned" value={`${allRowsFunnel.scanned}`} />
+                      <StatusChip label="Matched" value={`${allRowsFunnel.matched}`} />
+                      <StatusChip label="Criteria Pass" value={`${allRowsFunnel.criteriaPass}`} />
+                      <StatusChip
+                        label="After Filters"
+                        value={`${currentViewFunnel.afterFilters}`}
+                      />
+                    </div>
+                  </StatusCard>
+
+                  <StatusCard title="Top Fail Reasons">
+                    {overviewTopFailReasons.length === 0 ? (
+                      <p className="text-sm text-zinc-400">No fail reasons.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {overviewTopFailReasons.map((item) => {
+                          const active = decisionFilters.failReason === item.reason;
+                          return (
+                            <button
+                              key={`overview-${item.reason}`}
+                              type="button"
+                              onClick={() => onFailReasonChipClick(item.reason)}
+                              className={`rounded-full border px-3 py-1 text-xs transition ${
+                                active
+                                  ? "border-zinc-500 bg-zinc-700 text-zinc-100"
+                                  : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                              }`}
+                              title={`Filter by ${item.reason}`}
+                            >
+                              {item.reason} ({item.count})
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </StatusCard>
+                </div>
+              )}
+            </section>
+          )}
+
+          {dashboardInfoTab === "details" && (
+            <>
+          <section
+            id="dashboard-info-panel-details"
+            role="tabpanel"
+            aria-labelledby="dashboard-info-tab-details"
+            className="mb-4 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+          >
             <h2 className="text-base font-semibold text-zinc-100">Scan Status</h2>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -2596,6 +2916,110 @@ export default function Page() {
 
           <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-zinc-100">Decision Clarity</h2>
+              {decisionFilters.failReason && (
+                <button
+                  type="button"
+                  onClick={clearFailReasonFilter}
+                  className={compactActionButtonClass}
+                >
+                  Clear reason filter
+                </button>
+              )}
+            </div>
+
+            {products.length === 0 ? (
+              <p className="text-sm text-zinc-400">Run a scan to see decision clarity.</p>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                <StatusCard title="All Rows Funnel">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip label="Scanned" value={`${allRowsFunnel.scanned}`} />
+                    <StatusChip label="Matched" value={`${allRowsFunnel.matched}`} />
+                    <StatusChip
+                      label="Criteria Pass"
+                      value={`${allRowsFunnel.criteriaPass}`}
+                    />
+                    <StatusChip label="Failed" value={`${allRowsFunnel.failed}`} />
+                  </div>
+                </StatusCard>
+
+                <StatusCard title="Current View Funnel">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip label="Scanned" value={`${currentViewFunnel.scanned}`} />
+                    <StatusChip
+                      label="After Filters"
+                      value={`${currentViewFunnel.afterFilters}`}
+                    />
+                    <StatusChip
+                      label="Active Tab"
+                      value={`${currentViewFunnel.activeTabRows}`}
+                    />
+                  </div>
+                </StatusCard>
+
+                <StatusCard title="Top Fail Reasons (All Rows)">
+                  {failReasonStats.allRowsReasons.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No fail reasons.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {failReasonStats.allRowsReasons.map((item) => {
+                        const active = decisionFilters.failReason === item.reason;
+                        return (
+                          <button
+                            key={`all-${item.reason}`}
+                            type="button"
+                            onClick={() => onFailReasonChipClick(item.reason)}
+                            className={`rounded-full border px-3 py-1 text-xs transition ${
+                              active
+                                ? "border-zinc-500 bg-zinc-700 text-zinc-100"
+                                : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                            }`}
+                            title={`Filter by ${item.reason}`}
+                          >
+                            {item.reason} ({item.count})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </StatusCard>
+
+                <StatusCard title="Top Fail Reasons (Current View)">
+                  {failReasonStats.visibleRowsReasons.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No fail reasons.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {failReasonStats.visibleRowsReasons.map((item) => {
+                        const active = decisionFilters.failReason === item.reason;
+                        return (
+                          <button
+                            key={`visible-${item.reason}`}
+                            type="button"
+                            onClick={() => onFailReasonChipClick(item.reason)}
+                            className={`rounded-full border px-3 py-1 text-xs transition ${
+                              active
+                                ? "border-zinc-500 bg-zinc-700 text-zinc-100"
+                                : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                            }`}
+                            title={`Filter by ${item.reason}`}
+                          >
+                            {item.reason} ({item.count})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </StatusCard>
+              </div>
+            )}
+          </section>
+
+            </>
+          )}
+
+          <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-base font-semibold text-zinc-100">Dashboard Filters</h2>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={clearFilters} className={compactActionButtonClass}>
@@ -2646,6 +3070,14 @@ export default function Page() {
                 placeholder="qualified, no keepa..."
               />
               <FilterInput
+                label="Fail Reason contains"
+                value={decisionFilters.failReason}
+                onChange={(value) =>
+                  setDecisionFilters((prev) => ({ ...prev, failReason: value }))
+                }
+                placeholder="no bsr, no keepa match..."
+              />
+              <FilterInput
                 label="Min ROI (%)"
                 value={decisionFilters.minRoi}
                 onChange={(value) =>
@@ -2672,7 +3104,7 @@ export default function Page() {
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              {(["keepa_csv_asin", "keepa_csv_barcode", "live_keepa", "unmatched"] as MatchSource[]).map(
+              {MATCH_SOURCE_OPTIONS.map(
                 (source) => {
                   const active = decisionFilters.matchSources.includes(source);
                   return (
@@ -2784,6 +3216,54 @@ export default function Page() {
               </button>
             )}
           </div>
+
+          {products.length > 0 && visibleProducts.length === 0 && (
+            <section className="mb-4 rounded-xl border border-amber-700/60 bg-amber-950/30 p-4">
+              <p className="text-sm font-medium text-amber-200">
+                Scan completed, but rows are hidden by dashboard filters.
+              </p>
+              <p className="mt-1 text-xs text-amber-300/90">
+                {products.length} scanned row(s) exist. Active filters:{" "}
+                {activeFilterLabels.length > 0 ? activeFilterLabels.join(", ") : "unknown"}
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button type="button" onClick={clearFilters} className={compactActionButtonClass}>
+                  Reset Filters
+                </button>
+                {settings.onlyShowQualified && (
+                  <button
+                    type="button"
+                    onClick={() => setSetting("onlyShowQualified", false)}
+                    className={compactActionButtonClass}
+                  >
+                    Turn Off Show Qualified Only
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setResultsTab("results")}
+                  className={compactActionButtonClass}
+                >
+                  Go To Results Tab
+                </button>
+              </div>
+            </section>
+          )}
+
+          {resultsTab === "unmatched" && visibleProducts.length > 0 && unmatchedProducts.length === 0 && (
+            <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <p className="text-sm text-zinc-300">
+                No unmatched rows in current view. Your matched rows are in the Results tab.
+              </p>
+              <button
+                type="button"
+                onClick={() => setResultsTab("results")}
+                className="mt-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 transition hover:bg-zinc-800"
+              >
+                Switch to Results
+              </button>
+            </section>
+          )}
 
           {resultsTab === "unmatched" && unmatchedProducts.length > 0 && (
             <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
