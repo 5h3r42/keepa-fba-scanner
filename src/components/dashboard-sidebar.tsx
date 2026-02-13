@@ -1,9 +1,11 @@
 "use client";
 
 import { useDashboardSettings } from "@/lib/dashboard-settings";
+import { useTheme } from "@/lib/theme";
 
 export function DashboardSidebar() {
   const { activeView, setActiveView, setScanModalOpen } = useDashboardSettings();
+  const { theme, toggleTheme } = useTheme();
   const sidebarButtonClass =
     "w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-left text-zinc-100 transition hover:bg-zinc-800";
 
@@ -42,6 +44,16 @@ export function DashboardSidebar() {
           onClick={() => setActiveView("settings")}
         />
       </nav>
+
+      <div className="mt-8 border-t border-zinc-800 pt-4">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-left text-sm font-medium text-zinc-100 transition hover:bg-zinc-800"
+        >
+          Switch to {theme === "dark" ? "Light" : "Dark"} Mode
+        </button>
+      </div>
     </aside>
   );
 }
