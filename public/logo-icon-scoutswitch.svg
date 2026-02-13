@@ -1,0 +1,33 @@
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="320" y2="320" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B0B0E"/>
+      <stop offset="1" stop-color="#17181E"/>
+    </linearGradient>
+    <pattern id="scanLines" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(-10)">
+      <rect width="10" height="10" fill="transparent"/>
+      <rect width="4" height="10" fill="#1D2028"/>
+    </pattern>
+  </defs>
+
+  <rect width="320" height="320" rx="64" fill="url(#bg)"/>
+  <rect width="320" height="320" rx="64" fill="url(#scanLines)" opacity="0.55"/>
+
+  <circle cx="139" cy="153" r="74" stroke="#F5F5F7" stroke-width="16"/>
+  <line x1="189" y1="203" x2="240" y2="254" stroke="#F5F5F7" stroke-width="16" stroke-linecap="round"/>
+  <line x1="112" y1="112" x2="136" y2="97" stroke="#F5F5F7" stroke-width="10" stroke-linecap="round"/>
+
+  <rect x="101" y="127" width="3" height="54" fill="#F5F5F7"/>
+  <rect x="108" y="127" width="2" height="54" fill="#F5F5F7"/>
+  <rect x="114" y="127" width="4" height="54" fill="#F5F5F7"/>
+  <rect x="124" y="127" width="2" height="54" fill="#F5F5F7"/>
+  <rect x="130" y="127" width="4" height="54" fill="#F5F5F7"/>
+  <rect x="140" y="127" width="2" height="54" fill="#F5F5F7"/>
+  <rect x="146" y="127" width="3" height="54" fill="#F5F5F7"/>
+  <rect x="153" y="127" width="5" height="54" fill="#F5F5F7"/>
+  <rect x="163" y="127" width="2" height="54" fill="#F5F5F7"/>
+  <rect x="169" y="127" width="4" height="54" fill="#F5F5F7"/>
+  <rect x="178" y="127" width="2" height="54" fill="#F5F5F7"/>
+
+  <path d="M279 267L283 279L295 283L283 287L279 299L275 287L263 283L275 279L279 267Z" fill="#AEB2BE"/>
+</svg>
