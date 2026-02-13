@@ -1,9 +1,19 @@
 "use client";
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Moon, Sun } from "lucide-react";
 import * as XLSX from "xlsx";
 import { DashboardSettingsPanel } from "@/components/dashboard-settings-panel";
 import { useDashboardSettings } from "@/lib/dashboard-settings";
+import { useTheme } from "@/lib/theme";
 import {
   formatCurrencyValue,
   getMarketplaceConfig,
@@ -145,6 +155,11 @@ type LiveLookupResult = {
   tokenSnapshot: TokenSnapshot;
 };
 
+type ErrorDisplayParts = {
+  summary: string;
+  rawPayload: string | null;
+};
+
 const SAVED_SCANS_STORAGE_KEY = "keepa-saved-scans-v2";
 const CURRENT_SCAN_STORAGE_KEY = "keepa-current-scan-v2";
 const COLUMN_LAYOUT_STORAGE_KEY = "keepa-column-layout-v1";
@@ -155,6 +170,7 @@ const LIVE_FALLBACK_BATCH_SIZE = 100;
 const BARCODE_LIST_HARD_CAP = 2500;
 const BARCODE_INPUT_PERSIST_MAX_CHARS = 50_000;
 const BARCODE_INVALID_SAMPLE_LIMIT = 8;
+const SHOW_ERROR_PAYLOAD_BY_DEFAULT = false;
 
 const DEFAULT_COLUMN_LAYOUT: ColumnLayoutItem[] = [
   { key: "product", visible: true },
@@ -386,6 +402,9 @@ export default function Page() {
     setScanModalOpen,
     saveScanSignal,
   } = useDashboardSettings();
+  const { theme, toggleTheme } = useTheme();
+  const isLightMode = theme === "light";
+  const ThemeToggleIcon = isLightMode ? Sun : Moon;
 
   const [supplierFile, setSupplierFile] = useState<File | null>(null);
   const [keepaExportFile, setKeepaExportFile] = useState<File | null>(null);
@@ -420,6 +439,9 @@ export default function Page() {
     message: "",
   });
   const [error, setError] = useState("");
+  const [showErrorPayload, setShowErrorPayload] = useState(
+    SHOW_ERROR_PAYLOAD_BY_DEFAULT,
+  );
   const [sortConfig, setSortConfig] = useState<SortConfig>(null);
   const [columnLayout, setColumnLayout] =
     useState<ColumnLayoutItem[]>(DEFAULT_COLUMN_LAYOUT);
@@ -440,6 +462,9 @@ export default function Page() {
   const [serverCompare, setServerCompare] = useState<ScanCompareResult | null>(null);
 
   const lastHandledSaveSignalRef = useRef(0);
+  const supplierFileInputRef = useRef<HTMLInputElement | null>(null);
+  const keepaFileInputRef = useRef<HTMLInputElement | null>(null);
+  const barcodeListFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const actionButtonClass =
     "inline-flex h-12 items-center rounded-xl border border-zinc-700 bg-zinc-900 px-5 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500";
@@ -492,6 +517,16 @@ export default function Page() {
     scanInputMode === "supplier_file"
       ? Boolean(supplierFile)
       : barcodeListDiagnostics.finalCount > 0;
+
+  const errorDisplay = useMemo<ErrorDisplayParts>(() => parseErrorDisplay(error), [error]);
+
+  const hasScanInputDetails = Boolean(
+    (scanInputMode === "supplier_file" && (supplierFile || supplierFileName)) ||
+      (scanInputMode === "supplier_file" && (keepaExportFile || keepaExportFileName)) ||
+      (scanInputMode === "barcode_list" && barcodeListFileName) ||
+      (scanInputMode === "supplier_file" && keepaCsvStatus) ||
+      barcodeListStatus,
+  );
 
   const allFilterPresets = useMemo(
     () => [...BUILTIN_PRESETS, ...customFilterPresets],
@@ -563,6 +598,10 @@ export default function Page() {
   useEffect(() => {
     compareLatestServerRuns();
   }, [compareLatestServerRuns]);
+
+  useEffect(() => {
+    setShowErrorPayload(SHOW_ERROR_PAYLOAD_BY_DEFAULT);
+  }, [error]);
 
   useEffect(() => {
     try {
@@ -817,7 +856,36 @@ export default function Page() {
     );
   };
 
-  const clearSelection = () => setSelectedRowIds([]);
+  const deleteSelectedRows = () => {
+    if (selectedRowIds.length === 0) return;
+
+    const selectedSet = new Set(selectedRowIds);
+    const nextProducts = products.filter((product) => !selectedSet.has(product.id));
+    const nextMatchSummary = matchSummary
+      ? {
+          ...matchSummary,
+          total: nextProducts.length,
+          csvAsin: nextProducts.filter((row) => row.matchSource === "keepa_csv_asin").length,
+          csvBarcode: nextProducts.filter((row) => row.matchSource === "keepa_csv_barcode").length,
+          live: nextProducts.filter((row) => row.matchSource === "live_keepa").length,
+          unmatched: nextProducts.filter((row) => row.matchSource === "unmatched").length,
+        }
+      : null;
+
+    setProducts(nextProducts);
+    setSelectedRowIds([]);
+    setMatchSummary(nextMatchSummary);
+    setScanRunSummary((prev) =>
+      prev
+        ? {
+            ...prev,
+            totalRows: nextProducts.length,
+            qualifiedRows: nextProducts.filter((row) => row.matchesCriteria).length,
+            matchSummary: nextMatchSummary ?? prev.matchSummary,
+          }
+        : null,
+    );
+  };
 
   const toggleSelectRow = (rowId: string) => {
     setSelectedRowIds((prev) =>
@@ -1056,6 +1124,30 @@ export default function Page() {
     }
   };
 
+  const clearScanInputs = () => {
+    setSupplierFile(null);
+    setSupplierFileName("");
+    setKeepaExportFile(null);
+    setKeepaExportFileName("");
+    setKeepaCsvStatus("");
+    setKeepaCsvParsing(false);
+    setBarcodeListInput("");
+    setBarcodeListFileName("");
+    setBarcodeListStatus("");
+    setBarcodeListParsing(false);
+    setBarcodeInputReport(null);
+
+    if (supplierFileInputRef.current) {
+      supplierFileInputRef.current.value = "";
+    }
+    if (keepaFileInputRef.current) {
+      keepaFileInputRef.current.value = "";
+    }
+    if (barcodeListFileInputRef.current) {
+      barcodeListFileInputRef.current.value = "";
+    }
+  };
+
   const buildFailReasons = (input: {
     matchSource: MatchSource;
     sellPrice: number;
@@ -1086,6 +1178,30 @@ export default function Page() {
     }
 
     return reasons;
+  };
+
+  const findLiveMatchByIdentifiers = (
+    byKey: Record<string, KeepaLiveEnriched>,
+    asinRaw?: string,
+    barcodeRaw?: string,
+  ): { match: KeepaLiveEnriched | undefined; matchedBy: "asin" | "barcode" | null } => {
+    const asin = (asinRaw ?? "").trim().toUpperCase();
+    if (asin && byKey[asin]) {
+      return { match: byKey[asin], matchedBy: "asin" };
+    }
+
+    const barcode = normalizeBarcode(barcodeRaw ?? "");
+    if (!barcode) {
+      return { match: undefined, matchedBy: null };
+    }
+
+    for (const variant of barcodeVariants(barcode)) {
+      if (byKey[variant]) {
+        return { match: byKey[variant], matchedBy: "barcode" };
+      }
+    }
+
+    return { match: undefined, matchedBy: null };
   };
 
   const fetchLiveKeepa = async (
@@ -1124,10 +1240,18 @@ export default function Page() {
     const requestCost = payload.keepaMeta?.requestCost;
 
     if (!response.ok) {
-      if (response.status === 429 && requestCost?.blockedByGuard) {
+      if (response.status === 429) {
+        const guardBlocked = requestCost?.blockedByGuard ?? false;
+        const message = guardBlocked
+          ? "Token guard blocked live lookup."
+          : resolveKeepaErrorMessage(payload);
+
         return {
           byKey: {},
-          metaText: "Token guard blocked live lookup.",
+          metaText:
+            message && message !== "Keepa request failed"
+              ? message
+              : "Keepa token/rate limit reached. Remaining rows deferred.",
           apiCalls: requestCost?.apiCalls ?? 0,
           blockedByGuard: true,
           tokenSnapshot: {
@@ -1147,9 +1271,6 @@ export default function Page() {
       if (response.status === 413) {
         throw new Error("Request is too large for Keepa proxy limits. Reduce barcode count.");
       }
-      if (response.status === 429) {
-        throw new Error("Keepa proxy rate limit reached. Retry shortly.");
-      }
 
       throw new Error(resolveKeepaErrorMessage(payload));
     }
@@ -1166,7 +1287,9 @@ export default function Page() {
       };
       byKey[asin] = enriched;
       for (const code of extractLiveCodes(item)) {
-        byKey[code] = enriched;
+        for (const variant of barcodeVariants(code)) {
+          byKey[variant] = enriched;
+        }
       }
     }
 
@@ -1297,11 +1420,12 @@ export default function Page() {
   }): Product[] => {
     const provisional = input.rows.map((row, idx) => {
       const costMissing = input.scanInputMode === "barcode_list";
-      const liveByAsin = row.supplier.asin ? input.liveByKey[row.supplier.asin] : undefined;
-      const liveByBarcode = row.supplier.barcodeCanonical
-        ? input.liveByKey[row.supplier.barcodeCanonical]
-        : undefined;
-      const liveMatch = row.matchSource === "unmatched" ? liveByAsin || liveByBarcode : undefined;
+      const liveLookup = findLiveMatchByIdentifiers(
+        input.liveByKey,
+        row.supplier.asin,
+        row.supplier.barcodeCanonical,
+      );
+      const liveMatch = row.matchSource === "unmatched" ? liveLookup.match : undefined;
 
       const effectiveMatchSource: MatchSource =
         row.matchSource !== "unmatched"
@@ -1310,11 +1434,9 @@ export default function Page() {
             ? "live_keepa"
             : "unmatched";
 
-      const liveMatchedBy: "asin" | "barcode" | null = liveByAsin
-        ? "asin"
-        : liveByBarcode
-          ? "barcode"
-          : null;
+      const liveMatchedBy: "asin" | "barcode" | null = liveMatch
+        ? liveLookup.matchedBy
+        : null;
 
       const asin = row.supplier.asin || row.keepaCsv?.asin || liveMatch?.asin || "";
       const productTitle =
@@ -1618,7 +1740,7 @@ export default function Page() {
           if (liveResult.blockedByGuard) {
             blockedByGuard = true;
             deferredCandidates += fallbackCandidates.length - i;
-            latestMetaText = "Token guard threshold reached. Remaining rows deferred.";
+            latestMetaText = "Keepa limit reached. Remaining rows deferred.";
             break;
           }
 
@@ -1628,9 +1750,11 @@ export default function Page() {
           Object.assign(liveByKey, liveResult.byKey);
 
           for (const row of chunk) {
-            const hit =
-              liveResult.byKey[row.supplier.asin] ||
-              liveResult.byKey[row.supplier.barcodeCanonical];
+            const { match: hit } = findLiveMatchByIdentifiers(
+              liveResult.byKey,
+              row.supplier.asin,
+              row.supplier.barcodeCanonical,
+            );
             if (hit) matchedLive += 1;
           }
         }
@@ -1710,7 +1834,7 @@ export default function Page() {
         matchedLive: finalized.filter((p) => p.matchSource === "live_keepa").length,
         deferredCandidates,
         message: blockedByGuard
-          ? "Queue paused by token guard. Resume from unmatched tab."
+          ? "Queue paused by Keepa limit. Resume from unmatched tab."
           : "Background queue complete.",
       });
       if (scanInputMode === "supplier_file") {
@@ -1811,7 +1935,7 @@ export default function Page() {
         const liveResult = await fetchLiveKeepa(asins, codes);
         if (liveResult.blockedByGuard) {
           blockedByGuard = true;
-          latestMetaText = "Token guard reached while retrying unmatched rows.";
+          latestMetaText = "Keepa limit reached while retrying unmatched rows.";
           break;
         }
 
@@ -1824,9 +1948,11 @@ export default function Page() {
           const overrideBarcode = normalizeBarcode(
             manualOverrides[row.id]?.barcode || row.barcode || row.barcodeRaw,
           );
-          const hit =
-            (overrideAsin ? liveResult.byKey[overrideAsin] : undefined) ||
-            (overrideBarcode ? liveResult.byKey[overrideBarcode] : undefined);
+          const { match: hit } = findLiveMatchByIdentifiers(
+            liveResult.byKey,
+            overrideAsin,
+            overrideBarcode,
+          );
           if (hit) {
             matchedLive += 1;
             liveByProductId[row.id] = hit;
@@ -1938,7 +2064,7 @@ export default function Page() {
         ...prev,
         stage: "complete",
         message: blockedByGuard
-          ? "Token guard reached; some unmatched rows remain."
+          ? "Keepa limit reached; some unmatched rows remain."
           : "Unmatched retry complete.",
       }));
 
@@ -2002,13 +2128,35 @@ export default function Page() {
 
   return (
     <div>
-      <h1 className="mb-4 text-3xl font-semibold tracking-tight">
-        {activeView === "settings"
-          ? "Dashboard Settings"
-          : activeView === "saved"
-            ? "Saved Scans"
-            : "Decision Console"}
-      </h1>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <h1 className="text-3xl font-semibold tracking-tight">
+          {activeView === "settings"
+            ? "Dashboard Settings"
+            : activeView === "saved"
+              ? "Saved Scans"
+              : "Dashboard"}
+        </h1>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={isLightMode}
+          aria-label={`Switch to ${isLightMode ? "dark" : "light"} mode`}
+          onClick={toggleTheme}
+          className={`relative inline-flex h-8 w-16 items-center rounded-full border-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
+            isLightMode
+              ? "justify-end border-blue-600 bg-zinc-100"
+              : "justify-start border-zinc-500 bg-zinc-800"
+          }`}
+        >
+          <span
+            className={`mx-1 flex h-5 w-5 items-center justify-center rounded-full shadow-sm transition ${
+              isLightMode ? "bg-white text-zinc-700" : "bg-zinc-700 text-zinc-200"
+            }`}
+          >
+            <ThemeToggleIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+          </span>
+        </button>
+      </div>
 
       {activeView === "settings" ? (
         <DashboardSettingsPanel />
@@ -2177,93 +2325,207 @@ export default function Page() {
             />
           </div>
 
-          {scanInputMode === "supplier_file" && (supplierFile || supplierFileName) && (
-            <p className="mb-1 text-sm text-zinc-300">
-              Supplier: {supplierFile?.name ?? supplierFileName}
-            </p>
-          )}
-          {scanInputMode === "supplier_file" && (keepaExportFile || keepaExportFileName) && (
-            <p className="mb-1 text-sm text-zinc-300">
-              Keepa CSV: {keepaExportFile?.name ?? keepaExportFileName}
-            </p>
-          )}
-          {scanInputMode === "barcode_list" && barcodeListFileName && (
-            <p className="mb-1 text-sm text-zinc-300">Barcode list file: {barcodeListFileName}</p>
-          )}
-          {scanInputMode === "supplier_file" && keepaCsvStatus && (
-            <p className="mb-1 text-sm text-zinc-300">{keepaCsvStatus}</p>
-          )}
-          {barcodeListStatus && <p className="mb-1 text-sm text-zinc-300">{barcodeListStatus}</p>}
-          {keepaMetaText && <p className="mb-3 text-sm text-zinc-300">{keepaMetaText}</p>}
-          {error && <p className="mb-3 text-sm text-red-300">{error}</p>}
+          <section className="mb-4 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+            <h2 className="text-base font-semibold text-zinc-100">Scan Status</h2>
 
-          {inputQualityReport && (
-            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-300">
-              Input quality: {inputQualityReport.supplierRows} rows | Missing IDs: {inputQualityReport.missingIdentifierRows} | Invalid ASINs: {inputQualityReport.invalidAsinRows} | Invalid barcodes: {inputQualityReport.invalidBarcodeRows} | Duplicate ASIN rows: {inputQualityReport.duplicateAsinRows} | Duplicate barcode rows: {inputQualityReport.duplicateBarcodeRows}
-            </div>
-          )}
-          {barcodeInputReport && (
-            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-300">
-              Barcode input: {barcodeInputReport.rawCount.toLocaleString()} raw | {barcodeInputReport.validCount.toLocaleString()} valid | {barcodeInputReport.invalidCount.toLocaleString()} invalid | {barcodeInputReport.duplicatesRemoved.toLocaleString()} duplicates removed | {barcodeInputReport.cappedCount.toLocaleString()} capped/deferred
-            </div>
-          )}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {error && (
+                <StatusCard title="Error" className="md:col-span-2">
+                  <p className="break-words text-sm text-red-300">{errorDisplay.summary}</p>
+                  {errorDisplay.rawPayload && (
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowErrorPayload((prev) => !prev)}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:bg-zinc-800"
+                      >
+                        {showErrorPayload ? "Hide details" : "Show details"}
+                      </button>
+                      {showErrorPayload && (
+                        <pre className="mt-2 rounded-md border border-zinc-800 bg-black p-3 text-xs text-zinc-300 whitespace-pre-wrap break-all">
+                          {errorDisplay.rawPayload}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </StatusCard>
+              )}
 
-          {scanRunSummary && (
-            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-300">
-              Run {scanRunSummary.id} | Duration: {(scanRunSummary.durationMs / 1000).toFixed(1)}s | Token snapshot: ASIN {tokenSnapshot.asinTokensLeft ?? "-"}, Barcode {tokenSnapshot.codeTokensLeft ?? "-"}, Refill {tokenSnapshot.refillRate ?? "-"}/min
-            </div>
-          )}
+              {hasScanInputDetails && (
+                <StatusCard title="Scan input" className="md:col-span-2">
+                  <div className="space-y-1 text-sm text-zinc-300">
+                    {scanInputMode === "supplier_file" && (supplierFile || supplierFileName) && (
+                      <p className="break-words">
+                        Supplier: {supplierFile?.name ?? supplierFileName}
+                      </p>
+                    )}
+                    {scanInputMode === "supplier_file" && (keepaExportFile || keepaExportFileName) && (
+                      <p className="break-words">
+                        Keepa CSV: {keepaExportFile?.name ?? keepaExportFileName}
+                      </p>
+                    )}
+                    {scanInputMode === "barcode_list" && barcodeListFileName && (
+                      <p className="break-words">Barcode list file: {barcodeListFileName}</p>
+                    )}
+                    {scanInputMode === "supplier_file" && keepaCsvStatus && (
+                      <p className="break-words">{keepaCsvStatus}</p>
+                    )}
+                    {barcodeListStatus && <p className="break-words">{barcodeListStatus}</p>}
+                  </div>
+                </StatusCard>
+              )}
 
-          {queueProgress.totalCandidates > 0 && (
-            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3">
-              <p className="text-sm text-zinc-200">
-                Queue: {queueProgress.completedBatches}/{queueProgress.totalBatches} batches
-                | {queueProgress.processedCandidates}/{queueProgress.totalCandidates} rows
-                | Live matched: {queueProgress.matchedLive}
-                | Deferred: {queueProgress.deferredCandidates}
-              </p>
-              <div className="mt-2 h-2 w-full overflow-hidden rounded bg-zinc-800">
-                <div
-                  className="h-full bg-zinc-400 transition-all"
-                  style={{
-                    width: `${
-                      queueProgress.totalCandidates > 0
-                        ? Math.round(
-                            (queueProgress.processedCandidates /
-                              queueProgress.totalCandidates) *
-                              100,
-                          )
-                        : 0
-                    }%`,
-                  }}
-                />
-              </div>
-              <p className="mt-2 text-xs text-zinc-400">{queueProgress.message}</p>
-            </div>
-          )}
+              {keepaMetaText && (
+                <StatusCard title="Keepa metadata" className="md:col-span-2">
+                  <p className="break-words text-sm text-zinc-300">{keepaMetaText}</p>
+                </StatusCard>
+              )}
 
-          {matchSummary && (
-            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-200">
-              <p>
-                Total: {matchSummary.total} | CSV ASIN: {matchSummary.csvAsin} |
-                CSV Barcode: {matchSummary.csvBarcode} | Live fallback: {matchSummary.live} |
-                Unmatched: {matchSummary.unmatched}
-              </p>
-              <p>
-                Live fallback attempted: {matchSummary.fallbackAttempted}
-                {matchSummary.fallbackCapped > 0
-                  ? ` (cap reached, ${matchSummary.fallbackCapped} skipped)`
-                  : ""}
-                {matchSummary.fallbackDeferred > 0
-                  ? ` | deferred: ${matchSummary.fallbackDeferred}`
-                  : ""}
-              </p>
+              {inputQualityReport && (
+                <StatusCard title="Input quality">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip label="Rows" value={`${inputQualityReport.supplierRows}`} />
+                    <StatusChip
+                      label="Missing IDs"
+                      value={`${inputQualityReport.missingIdentifierRows}`}
+                    />
+                    <StatusChip
+                      label="Invalid ASINs"
+                      value={`${inputQualityReport.invalidAsinRows}`}
+                    />
+                    <StatusChip
+                      label="Invalid barcodes"
+                      value={`${inputQualityReport.invalidBarcodeRows}`}
+                    />
+                    <StatusChip
+                      label="Duplicate ASIN rows"
+                      value={`${inputQualityReport.duplicateAsinRows}`}
+                    />
+                    <StatusChip
+                      label="Duplicate barcode rows"
+                      value={`${inputQualityReport.duplicateBarcodeRows}`}
+                    />
+                  </div>
+                </StatusCard>
+              )}
+
+              {barcodeInputReport && (
+                <StatusCard title="Barcode input">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip
+                      label="Raw"
+                      value={barcodeInputReport.rawCount.toLocaleString()}
+                    />
+                    <StatusChip
+                      label="Valid"
+                      value={barcodeInputReport.validCount.toLocaleString()}
+                    />
+                    <StatusChip
+                      label="Invalid"
+                      value={barcodeInputReport.invalidCount.toLocaleString()}
+                    />
+                    <StatusChip
+                      label="Duplicates removed"
+                      value={barcodeInputReport.duplicatesRemoved.toLocaleString()}
+                    />
+                    <StatusChip
+                      label="Capped/deferred"
+                      value={barcodeInputReport.cappedCount.toLocaleString()}
+                    />
+                  </div>
+                </StatusCard>
+              )}
+
+              {scanRunSummary && (
+                <StatusCard title="Run">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip label="Run ID" value={scanRunSummary.id} />
+                    <StatusChip
+                      label="Duration"
+                      value={`${(scanRunSummary.durationMs / 1000).toFixed(1)}s`}
+                    />
+                    <StatusChip
+                      label="ASIN tokens"
+                      value={`${tokenSnapshot.asinTokensLeft ?? "-"}`}
+                    />
+                    <StatusChip
+                      label="Barcode tokens"
+                      value={`${tokenSnapshot.codeTokensLeft ?? "-"}`}
+                    />
+                    <StatusChip
+                      label="Refill"
+                      value={`${tokenSnapshot.refillRate ?? "-"}/min`}
+                    />
+                  </div>
+                </StatusCard>
+              )}
+
+              {queueProgress.totalCandidates > 0 && (
+                <StatusCard title="Queue" className="md:col-span-2">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip
+                      label="Batches"
+                      value={`${queueProgress.completedBatches}/${queueProgress.totalBatches}`}
+                    />
+                    <StatusChip
+                      label="Rows"
+                      value={`${queueProgress.processedCandidates}/${queueProgress.totalCandidates}`}
+                    />
+                    <StatusChip
+                      label="Live matched"
+                      value={`${queueProgress.matchedLive}`}
+                    />
+                    <StatusChip
+                      label="Deferred"
+                      value={`${queueProgress.deferredCandidates}`}
+                    />
+                  </div>
+                  <div className="mt-3 h-2 w-full overflow-hidden rounded bg-zinc-800">
+                    <div
+                      className="h-full bg-zinc-400 transition-all"
+                      style={{
+                        width: `${
+                          queueProgress.totalCandidates > 0
+                            ? Math.round(
+                                (queueProgress.processedCandidates /
+                                  queueProgress.totalCandidates) *
+                                  100,
+                              )
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <p className="mt-2 break-words text-xs text-zinc-400">{queueProgress.message}</p>
+                </StatusCard>
+              )}
+
+              {matchSummary && (
+                <StatusCard title="Match summary">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusChip label="Total" value={`${matchSummary.total}`} />
+                    <StatusChip label="CSV ASIN" value={`${matchSummary.csvAsin}`} />
+                    <StatusChip label="CSV barcode" value={`${matchSummary.csvBarcode}`} />
+                    <StatusChip label="Live fallback" value={`${matchSummary.live}`} />
+                    <StatusChip label="Unmatched" value={`${matchSummary.unmatched}`} />
+                    <StatusChip
+                      label="Fallback attempted"
+                      value={`${matchSummary.fallbackAttempted}`}
+                    />
+                    <StatusChip label="Cap reached" value={`${matchSummary.fallbackCapped}`} />
+                    <StatusChip
+                      label="Deferred"
+                      value={`${matchSummary.fallbackDeferred}`}
+                    />
+                  </div>
+                </StatusCard>
+              )}
             </div>
-          )}
+          </section>
 
           <section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-base font-semibold text-zinc-100">Decision Console Filters</h2>
+              <h2 className="text-base font-semibold text-zinc-100">Dashboard Filters</h2>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={clearFilters} className={compactActionButtonClass}>
                   Reset Filters
@@ -2667,11 +2929,11 @@ export default function Page() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={clearSelection}
+                onClick={deleteSelectedRows}
                 disabled={selectedProducts.length === 0}
                 className={compactActionButtonClass}
               >
-                Clear Selection
+                Delete Selected
               </button>
               <button
                 type="button"
@@ -2764,44 +3026,61 @@ export default function Page() {
                 </p>
 
                 <div className="space-y-2 overflow-y-auto px-6 pb-4">
-                  {columnLayout.map((item, index) => (
-                    <div
-                      key={item.key}
-                      className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black px-3 py-2"
-                    >
-                      <label className="flex items-center gap-3 text-sm text-zinc-100">
-                        <input
-                          type="checkbox"
-                          checked={item.visible}
-                          onChange={() => toggleColumnVisibility(item.key)}
-                          disabled={
-                            item.visible &&
-                            columnLayout.filter((column) => column.visible).length === 1
-                          }
-                        />
-                        <span>{COLUMN_LABELS[item.key]}</span>
-                      </label>
+                  {columnLayout.map((item, index) => {
+                    const isLastVisibleColumn =
+                      item.visible && columnLayout.filter((column) => column.visible).length === 1;
 
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => moveColumn(index, -1)}
-                          disabled={index === 0}
-                          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => moveColumn(index, 1)}
-                          disabled={index === columnLayout.length - 1}
-                          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
-                        >
-                          ↓
-                        </button>
+                    return (
+                      <div
+                        key={item.key}
+                        className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black px-3 py-2"
+                      >
+                        <div className="flex items-center gap-3 text-sm text-zinc-100">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={item.visible}
+                            aria-label={`Toggle ${COLUMN_LABELS[item.key]} column visibility`}
+                            onClick={() => toggleColumnVisibility(item.key)}
+                            disabled={isLastVisibleColumn}
+                            className="rounded-full outline-none ring-offset-zinc-950 focus-visible:ring-2 focus-visible:ring-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <span
+                              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition ${
+                                item.visible ? "bg-blue-500" : "bg-zinc-700"
+                              }`}
+                            >
+                              <span
+                                className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                                  item.visible ? "translate-x-5" : "translate-x-0.5"
+                                }`}
+                              />
+                            </span>
+                          </button>
+                          <span>{COLUMN_LABELS[item.key]}</span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => moveColumn(index, -1)}
+                            disabled={index === 0}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveColumn(index, 1)}
+                            disabled={index === columnLayout.length - 1}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-500"
+                          >
+                            ↓
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 <div className="sticky bottom-0 mt-2 flex justify-end gap-2 border-t border-zinc-800 bg-zinc-950 px-6 py-4">
@@ -2862,6 +3141,7 @@ export default function Page() {
                     <label className="block">
                       <span className="mb-1 block text-sm">Supplier File (.csv/.xlsx)</span>
                       <input
+                        ref={supplierFileInputRef}
                         type="file"
                         accept=".xlsx,.xls,.csv"
                         onChange={onSupplierFileChange}
@@ -2872,6 +3152,7 @@ export default function Page() {
                     <label className="block">
                       <span className="mb-1 block text-sm">Keepa Export CSV (optional)</span>
                       <input
+                        ref={keepaFileInputRef}
                         type="file"
                         accept=".csv"
                         onChange={onKeepaFileChange}
@@ -2914,6 +3195,7 @@ export default function Page() {
                     <label className="block">
                       <span className="mb-1 block text-sm">Upload barcode list (.txt/.csv)</span>
                       <input
+                        ref={barcodeListFileInputRef}
                         type="file"
                         accept=".txt,.csv"
                         onChange={onBarcodeListFileChange}
@@ -2962,6 +3244,13 @@ export default function Page() {
                 )}
 
                 <div className="mt-5 flex justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={clearScanInputs}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition hover:bg-zinc-800"
+                  >
+                    Clear Files
+                  </button>
                   <button
                     type="button"
                     onClick={() => setScanModalOpen(false)}
@@ -3052,4 +3341,70 @@ function FilterInput({
       />
     </label>
   );
+}
+
+function StatusCard({
+  title,
+  children,
+  className = "",
+}: {
+  title: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <article className={`rounded-lg border border-zinc-800 bg-black p-3 ${className}`.trim()}>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+        {title}
+      </h3>
+      {children}
+    </article>
+  );
+}
+
+function StatusChip({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-zinc-700 bg-black px-3 py-1 text-xs text-zinc-300">
+      <span className="text-zinc-400">{label}:</span>
+      <span className="break-all text-zinc-100">{value}</span>
+    </span>
+  );
+}
+
+function parseErrorDisplay(errorMessage: string): ErrorDisplayParts {
+  const trimmed = errorMessage.trim();
+  if (!trimmed) {
+    return { summary: "", rawPayload: null };
+  }
+
+  const objectIndex = trimmed.indexOf("{");
+  const arrayIndex = trimmed.indexOf("[");
+  const payloadIndexCandidates = [objectIndex, arrayIndex].filter(
+    (index) => index >= 0,
+  );
+  const payloadIndex =
+    payloadIndexCandidates.length > 0 ? Math.min(...payloadIndexCandidates) : -1;
+
+  if (payloadIndex >= 0) {
+    const summaryPrefix = trimmed.slice(0, payloadIndex).replace(/[:\s]+$/, "").trim();
+    const rawPayload = trimmed.slice(payloadIndex).trim();
+    return {
+      summary: summaryPrefix || "Request failed",
+      rawPayload: rawPayload || null,
+    };
+  }
+
+  const separatorIndex = trimmed.indexOf(": ");
+  if (separatorIndex > 0 && separatorIndex < trimmed.length - 2) {
+    const summary = trimmed.slice(0, separatorIndex).trim();
+    const rawPayload = trimmed.slice(separatorIndex + 2).trim();
+    if (summary && rawPayload) {
+      return {
+        summary,
+        rawPayload,
+      };
+    }
+  }
+
+  return { summary: trimmed, rawPayload: null };
 }
