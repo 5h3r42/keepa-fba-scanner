@@ -1,36 +1,136 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Keepa FBA Scanner
 
-## Getting Started
+A Next.js app for wholesale sourcing decisions with:
+- Supplier file ingestion (`.csv`, `.xlsx`)
+- Barcode-list ingestion (paste or `.txt`/`.csv` upload)
+- Keepa CSV merge + live Keepa fallback
+- Marketplace-aware lookups (UK/US/EU)
+- Profit/ROI scoring with configurable fee and VAT settings
+- Decision console filters, presets, row selection, and bulk export
+- Unmatched remediation with retry and manual identifier overrides
+- Local saved scans and optional server-backed scan history
 
-First, run the development server:
+## Tech Stack
+- Next.js App Router
+- React + TypeScript
+- Tailwind CSS
+- `xlsx` for spreadsheet parsing/export
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Setup
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Configure env in `.env.local`:
+   ```bash
+   KEEPA_API_KEY=your_keepa_key
+
+   # Optional: secure proxy routes with a shared token
+   KEEPA_PROXY_TOKEN=your_internal_proxy_token
+
+   # Optional: allow browser client to send token to /api/keepa
+   NEXT_PUBLIC_KEEPA_PROXY_TOKEN=your_internal_proxy_token
+
+   # Optional: Keepa proxy requests per minute per client
+   KEEPA_PROXY_RPM=40
+   ```
+3. Start dev server:
+   ```bash
+   npm run dev
+   ```
+
+## Key Features
+
+### 1) Scan Modes
+- **CSV-first + live fallback queue**: uses Keepa CSV first, then live API for unmatched rows
+- **Live-only**: no Keepa CSV provided, uses live lookups
+- **Barcode list live scan**: paste/upload UPC/EAN/GTIN list and run direct live Keepa lookup (up to 2,500 per run)
+
+### 2) Token-Aware Queue Controls
+- Configurable max live fallback rows (`maxLiveFallbackRows`)
+- Token budget modes: `off`, `warn`, `hard_stop`
+- Hard stop threshold (`tokenHardLimit`) to defer remaining rows
+
+### 3) Decision Console
+- Global search/filter across product, ASIN, barcode, status
+- Numeric thresholds: min ROI, min profit, max BSR
+- Match source chips (`keepa_csv_asin`, `keepa_csv_barcode`, `live_keepa`, `unmatched`)
+- Saved custom filter presets
+- Row selection and bulk export of selected rows
+
+### 4) Unmatched Remediation
+- Dedicated unmatched tab
+- Suggestions for identifier issues
+- Manual ASIN/barcode override per row
+- Retry unmatched rows only
+
+### 5) Marketplace Support
+- Marketplace setting drives:
+  - Keepa domain
+  - Amazon product link host
+  - Currency formatting defaults
+
+### 6) Persistence
+- **Local browser storage**:
+  - Current scan snapshot
+  - Saved scans
+  - Column layout
+  - Custom filter presets
+- **Optional server-backed history** (`/api/scans`):
+  - Save scan runs with summary and compacted rows
+  - Fetch/open previous runs
+  - Compare two runs (`/api/scans?compare=<id1>,<id2>`)
+
+## API Routes
+
+### `POST /api/keepa`
+Proxy to Keepa with protections:
+- optional token auth (`x-keepa-proxy-token`)
+- per-client rate limiting
+- payload size limits
+- timeout + retry + backoff
+- basic circuit breaker
+
+Body:
+```json
+{
+  "asins": ["B000000000"],
+  "codes": ["5012345678901"],
+  "marketplace": "UK",
+  "tokenGuard": {
+    "mode": "hard_stop",
+    "hardLimit": 100
+  }
+}
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### `GET /api/keepa`
+Query equivalent for debugging:
+- `asin`, `code`, `marketplace`, `tokenMode`, `tokenHardLimit`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### `GET /api/scans`
+- List server-backed scans
+- `includeProducts=1` to include row payloads
+- `compare=<id1>,<id2>` for run delta summary
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### `POST /api/scans`
+Persist scan summary + products.
 
-## Learn More
+### `GET /api/scans/[id]`
+Load a specific persisted scan.
 
-To learn more about Next.js, take a look at the following resources:
+### `PATCH /api/scans/[id]`
+Update scan notes/tags.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Development Commands
+```bash
+npm run dev
+npm run lint
+npm run build
+npm run start
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Notes
+- Keepa token usage is variable and depends on request patterns and upstream behavior.
+- Server-backed scan history is file-based in `.data/scan-history.json` for lightweight local deployment.
+- For production, use durable storage (database/object store) and stronger auth.
