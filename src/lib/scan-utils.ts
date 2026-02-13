@@ -91,8 +91,19 @@ export const barcodeVariants = (code: string): string[] => {
   const c = normalizeBarcode(code);
   if (!c) return [];
   const variants = new Set<string>([c]);
-  if (c.length === 12) variants.add(`0${c}`);
-  if (c.length === 13 && c.startsWith("0")) variants.add(c.slice(1));
+
+  // Support UPC/EAN/GTIN representations of the same identifier.
+  if (c.length === 12) {
+    variants.add(`0${c}`);
+    variants.add(`00${c}`);
+  } else if (c.length === 13) {
+    variants.add(`0${c}`);
+    if (c.startsWith("0")) variants.add(c.slice(1));
+  } else if (c.length === 14) {
+    if (c.startsWith("0")) variants.add(c.slice(1));
+    if (c.startsWith("00")) variants.add(c.slice(2));
+  }
+
   return Array.from(variants);
 };
 
@@ -228,7 +239,9 @@ export const parseKeepaCsvRows = (sheet: XLSX.WorkSheet): KeepaCsvRowNormalized[
       norm[normalizeKey("Buy Box 🚚: 90 days avg.")],
     );
     const sellPrice = buyBoxCurrent;
-    const bsr = parseCurrencyLike(norm[normalizeKey("Sales Rank: Current")]);
+    const bsrCurrent = parseCurrencyLike(norm[normalizeKey("Sales Rank: Current")]);
+    const bsr90dAvg = parseCurrencyLike(norm[normalizeKey("Sales Rank: 90 days avg.")]);
+    const bsr = bsrCurrent > 0 ? bsrCurrent : bsr90dAvg;
     const bsrDrops90d = parseCurrencyLike(
       norm[normalizeKey("Sales Rank: Drops last 90 days")],
     );

@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, Trash2 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { DashboardSettingsPanel } from "@/components/dashboard-settings-panel";
 import { useDashboardSettings } from "@/lib/dashboard-settings";
@@ -460,6 +460,7 @@ export default function Page() {
   const [tokenSnapshot, setTokenSnapshot] = useState<TokenSnapshot>(EMPTY_TOKEN_SNAPSHOT);
   const [serverScans, setServerScans] = useState<ScanHistoryRecord[]>([]);
   const [serverCompare, setServerCompare] = useState<ScanCompareResult | null>(null);
+  const [deletingServerScanId, setDeletingServerScanId] = useState<string | null>(null);
 
   const lastHandledSaveSignalRef = useRef(0);
   const supplierFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -470,6 +471,8 @@ export default function Page() {
     "inline-flex h-12 items-center rounded-xl border border-zinc-700 bg-zinc-900 px-5 text-sm font-medium text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500";
   const compactActionButtonClass =
     "rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 transition hover:bg-zinc-800";
+  const iconActionButtonClass =
+    "inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-700 bg-zinc-900 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 disabled:cursor-not-allowed disabled:opacity-60";
 
   const marketplaceConfig = getMarketplaceConfig(settings.marketplace);
   const formatCurrency = useCallback(
@@ -846,6 +849,30 @@ export default function Page() {
   const deleteSavedScan = (id: string) => {
     const next = savedScans.filter((scan) => scan.id !== id);
     persistSavedScans(next);
+  };
+
+  const deleteServerScan = async (id: string) => {
+    const target = serverScans.find((scan) => scan.id === id);
+    if (!target) return;
+    const confirmed = window.confirm(`Delete server run ${target.summary.id}?`);
+    if (!confirmed) return;
+
+    setDeletingServerScanId(id);
+    try {
+      const response = await fetch(`/api/scans/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        setError("Failed to delete server scan.");
+        return;
+      }
+      setServerScans((prev) => prev.filter((scan) => scan.id !== id));
+      setSaveNotice(`Deleted server run: ${target.summary.id}`);
+    } catch {
+      setError("Failed to delete server scan.");
+    } finally {
+      setDeletingServerScanId(null);
+    }
   };
 
   const downloadSavedScan = (scan: SavedScan) => {
@@ -2109,6 +2136,36 @@ export default function Page() {
     setDecisionFilters(DEFAULT_FILTERS);
   };
 
+  const clearResults = () => {
+    if (products.length === 0) return;
+    const confirmed = window.confirm("Clear current results from this dashboard?");
+    if (!confirmed) return;
+
+    setProducts([]);
+    setMatchSummary(null);
+    setScanRunSummary(null);
+    setInputQualityReport(null);
+    setSelectedRowIds([]);
+    setManualOverrides({});
+    setQueueProgress({
+      stage: "idle",
+      totalCandidates: 0,
+      processedCandidates: 0,
+      totalBatches: 0,
+      completedBatches: 0,
+      matchedLive: 0,
+      deferredCandidates: 0,
+      message: "",
+    });
+    setTokenSnapshot(EMPTY_TOKEN_SNAPSHOT);
+    setKeepaMetaText("");
+    setScanProgressText("");
+    setError("");
+    setResultsTab("results");
+    setCurrentPage(1);
+    setSaveNotice("Cleared current results.");
+  };
+
   const removeCustomPreset = (id: string) => {
     setCustomFilterPresets((prev) => prev.filter((preset) => preset.id !== id));
   };
@@ -2202,9 +2259,11 @@ export default function Page() {
                       <button
                         type="button"
                         onClick={() => deleteSavedScan(scan.id)}
-                        className={compactActionButtonClass}
+                        className={iconActionButtonClass}
+                        aria-label={`Delete ${scan.name}`}
+                        title="Delete scan"
                       >
-                        Delete
+                        <Trash2 aria-hidden="true" className="h-4 w-4" />
                       </button>
                     </div>
                   </div>
@@ -2246,13 +2305,25 @@ export default function Page() {
                         {new Date(scan.summary.completedAt).toLocaleString()} | {scan.summary.totalRows} rows | {scan.summary.qualifiedRows} qualified
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => loadServerScan(scan)}
-                      className={compactActionButtonClass}
-                    >
-                      Open
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => loadServerScan(scan)}
+                        className={compactActionButtonClass}
+                      >
+                        Open
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteServerScan(scan.id)}
+                        disabled={deletingServerScanId === scan.id}
+                        className={iconActionButtonClass}
+                        aria-label={`Delete server run ${scan.summary.id}`}
+                        title="Delete server run"
+                      >
+                        <Trash2 aria-hidden="true" className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2691,6 +2762,16 @@ export default function Page() {
               onClick={() => setResultsTab("unmatched")}
             >
               Unmatched Remediation ({unmatchedProducts.length})
+            </button>
+            <button
+              type="button"
+              onClick={clearResults}
+              disabled={products.length === 0 || loading}
+              className={iconActionButtonClass}
+              aria-label="Clear current results"
+              title="Clear current results"
+            >
+              <Trash2 aria-hidden="true" className="h-4 w-4" />
             </button>
             {resultsTab === "unmatched" && (
               <button
